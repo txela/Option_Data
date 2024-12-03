@@ -5,7 +5,6 @@ import math
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # Function to abbreviate numbers with K, M, B
 def abbreviate_number(num):
@@ -37,62 +36,68 @@ st.title("📈 Delta Hedging Exposure Visualization Tool")
 # Sidebar for Input Parameters
 with st.sidebar:
     st.header("🛠️ Input Parameters")
+    st.markdown("### Stock Information")
     
-    with st.expander("📉 Stock Information"):
-        ticker = st.text_input(
-            "Stock Ticker",
-            value="AAPL",
-            help="Enter the ticker symbol of the stock you want to analyze (e.g., AAPL for Apple Inc.)."
-        )
+    # Directly placed the ticker input without expander
+    ticker = st.text_input(
+        "Stock Ticker",
+        value="NVDA",
+        help="Enter the ticker symbol of the stock you want to analyze (e.g., NVDA for NVIDIA Corporation)."
+    )
     
-    with st.expander("📊 Volatility & Rates"):
-        sigma = st.slider(
-            "Implied Volatility (σ)",
-            0.1,
-            1.0,
-            0.2,
-            0.01,
-            help=(
-                "Implied Volatility represents the market's forecast of a likely movement in the stock's price. "
-                "Higher volatility indicates a higher risk and potentially higher option premiums."
-            )
-        )
-        
-        r = st.slider(
-            "Risk-Free Rate (r)",
-            0.0,
-            0.1,
-            0.01,
-            0.001,
-            help=(
-                "The Risk-Free Rate is the theoretical rate of return of an investment with zero risk, "
-                "typically based on government bonds. It is used in option pricing models to discount future payoffs."
-            )
-        )
+    st.markdown("---")
     
-    with st.expander("📅 Expiry & Strikes"):
-        expiry_index = st.slider(
-            "Select Expiry Index",
-            0,
-            4,
-            0,
-            help=(
-                "Select the index corresponding to the option's expiry date from the available list. "
-                "Different expiry dates can significantly impact option pricing and delta exposure."
-            )
+    st.subheader("📊 Volatility & Rates")
+    sigma = st.slider(
+        "Implied Volatility (σ)",
+        0.1,
+        1.0,
+        0.2,
+        0.01,
+        help=(
+            "Implied Volatility represents the market's forecast of a likely movement in the stock's price. "
+            "Higher volatility indicates a higher risk and potentially higher option premiums."
         )
-        
-        range_percent = st.slider(
-            "Strike Range (% around current price)",
-            0,
-            50,
-            15,
-            1,
-            help=(
-                "Define the percentage range around the current stock price to include strike prices for analysis. "
-                "For example, a range of 15% will include strikes from -15% to +15% around the current price."
-            )
+    )
+    
+    r = st.slider(
+        "Risk-Free Rate (r)",
+        0.0,
+        0.1,
+        0.01,
+        0.001,
+        help=(
+            "The Risk-Free Rate is the theoretical rate of return of an investment with zero risk, "
+            "typically based on government bonds. It is used in option pricing models to discount future payoffs."
         )
+    )
+    
+    st.markdown("---")
+    
+    st.subheader("📅 Expiry & Strikes")
+    range_percent = st.slider(
+        "Strike Range (% around current price)",
+        0,
+        50,
+        15,
+        1,
+        help=(
+            "Define the percentage range around the current stock price to include strike prices for analysis. "
+            "For example, a range of 15% will include strikes from -15% to +15% around the current price."
+        )
+    )
+
+    dte_range = st.slider(
+        "Days to Expiry (DTE)",
+        0,
+        365,
+        (0, 50),
+        1,
+        help=(
+            "Select the range of days to expiry for the options contracts to include in the analysis. "
+            "Default is 0 to 50 days."
+        )
+    )
     
     st.markdown("---")
     st.markdown(
@@ -112,11 +117,24 @@ if len(expiry_dates) == 0:
     st.error("❌ No options data available for this ticker.")
     st.stop()
 
-if expiry_index >= len(expiry_dates):
-    st.error(f"❌ Expiry index out of range. Available indices: 0 to {len(expiry_dates)-1}")
+# Calculate Days to Expiry (DTE)
+expiry_dates_dte = [
+    (expiry_date, (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days)
+    for expiry_date in expiry_dates
+]
+
+# Filter expiry dates based on DTE range
+filtered_expiry_dates = [
+    date for date, dte in expiry_dates_dte if dte_range[0] <= dte <= dte_range[1]
+]
+
+if not filtered_expiry_dates:
+    st.error("❌ No options contracts available within the specified DTE range.")
     st.stop()
 
-expiry_date = expiry_dates[expiry_index]
+# Use the first expiry date from the filtered list by default
+expiry_date = filtered_expiry_dates[0]
+
 try:
     options_chain = stock.option_chain(expiry_date)
 except Exception as e:
@@ -141,7 +159,7 @@ options = pd.concat([calls, puts])
 # Filter Strikes Within Specified Range
 lower_bound = S * (1 - range_percent / 100)
 upper_bound = S * (1 + range_percent / 100)
-filtered_options = options[(options['strike'] >= lower_bound) & (options['strike'] <= upper_bound)]
+filtered_options = options[(options['strike'] >= lower_bound) & (options['strike'] <= upper_bound)].copy()
 
 # Verify if 'openInterest' exists
 if 'openInterest' not in filtered_options.columns:
@@ -149,11 +167,11 @@ if 'openInterest' not in filtered_options.columns:
     st.stop()
 
 # Ensure 'openInterest' is numeric and handle missing values
-filtered_options['openInterest'] = pd.to_numeric(filtered_options['openInterest'], errors='coerce').fillna(0)
+filtered_options.loc[:, 'openInterest'] = pd.to_numeric(filtered_options['openInterest'], errors='coerce').fillna(0)
 
 # Calculate Delta Exposure Separately for Calls and Puts
 # Multiply by 100 to account for contract size
-filtered_options['Delta_Exposure'] = filtered_options.apply(
+filtered_options.loc[:, 'Delta_Exposure'] = filtered_options.apply(
     lambda row: row['Delta'] * row['openInterest'] * 100, axis=1
 )
 
@@ -164,7 +182,7 @@ delta_exposure_puts = filtered_options[filtered_options['Type'] == 'Put'].groupb
 # Merge Calls and Puts Delta Exposure
 delta_exposure = pd.merge(delta_exposure_calls, delta_exposure_puts, on='strike', how='outer', suffixes=('_Call', '_Put')).fillna(0)
 
-# Tabs for Organized Display (Visualization first)
+# Tabs for Organized Display
 tab1, tab2, tab3 = st.tabs(["📈 Visualization", "📊 Data Overview", "🔍 Analytics"])
 
 with tab1:
@@ -217,20 +235,25 @@ with tab1:
     buffer = max_delta * 0.1
     x_limit = max_delta + buffer
     
-    # Update the layout to have symmetric x-axis
+    # Update the layout to have reversed x-axis (higher to lower) and normal y-axis (lower to higher)
     fig.update_layout(
         xaxis=dict(
             title="Delta Exposure",
-            range=[-x_limit, x_limit],
+            range=[x_limit, -x_limit],  # Reversed from higher to lower
             tickmode='linear',
             tick0=-x_limit,
             dtick=x_limit / 4,
             tickformat=".2s",
-            tickvals=np.linspace(-x_limit, x_limit, num=5),
-            ticktext=[format_ticks(val, 'x') for val in np.linspace(-x_limit, x_limit, num=5)]
+            tickvals=np.linspace(x_limit, -x_limit, num=5),
+            ticktext=[format_ticks(val, 'x') for val in np.linspace(x_limit, -x_limit, num=5)]
         ),
         yaxis_title="Strike Price",
-        yaxis=dict(autorange='reversed'),  # To have lower strikes at the bottom
+        yaxis=dict(
+            tickmode='linear',
+            tick0=math.floor(lower_bound / 5) * 5,  # Adjust tick0 to nearest multiple of 5
+            dtick=math.ceil((upper_bound - lower_bound) / 10 / 5) * 5,  # Adjust dtick to nearest multiple of 5
+            # Removed 'autorange' to let Plotly handle it automatically
+        ),
         template='plotly_white',
         hovermode='closest',
         height=700,
@@ -253,16 +276,16 @@ with tab1:
     # Add a horizontal dotted line at the current stock price
     fig.add_shape(
         type='line',
-        x0=-x_limit,
+        x0=x_limit,
         y0=S,
-        x1=x_limit,
+        x1=-x_limit,
         y1=S,
         line=dict(color='green', width=2, dash='dot'),
     )
     
     # Add annotation for the current stock price line
     fig.add_annotation(
-        x=x_limit * 0.95,  # Position near the end of the x-axis
+        x=-x_limit * 0.95,  # Adjusted position due to reversed x-axis
         y=S,
         xref="x",
         yref="y",
@@ -296,17 +319,17 @@ with tab2:
             'Delta_Exposure_Call': 'Call Delta Exposure', 
             'Delta_Exposure_Put': 'Put Delta Exposure'
         }
-    ).astype(int).copy()
+    ).copy()
     
-    # Apply abbreviation
-    styled_df['Call Delta Exposure'] = styled_df['Call Delta Exposure'].apply(abbreviate_number)
-    styled_df['Put Delta Exposure'] = styled_df['Put Delta Exposure'].apply(abbreviate_number)
+    # Convert Delta Exposures to integers for abbreviation
+    styled_df['Call Delta Exposure'] = styled_df['Call Delta Exposure'].astype(int).apply(abbreviate_number)
+    styled_df['Put Delta Exposure'] = styled_df['Put Delta Exposure'].astype(int).apply(abbreviate_number)
     
     st.dataframe(styled_df.style.format("{:}"), height=400)
 
 with tab3:
     st.subheader("🔍 Analytics")
-
+    
     # Ensure that required data is available
     if filtered_options.empty:
         st.warning("No options data available within the specified strike range.")
@@ -319,7 +342,7 @@ with tab3:
         else:
             return 'ITM' if row['strike'] > S else 'OTM'
 
-    filtered_options['Moneyness'] = filtered_options.apply(get_moneyness, axis=1)
+    filtered_options.loc[:, 'Moneyness'] = filtered_options.apply(get_moneyness, axis=1)
 
     # Group by Type and Moneyness
     grouped = filtered_options.groupby(['Type', 'Moneyness'])
@@ -327,98 +350,239 @@ with tab3:
     # Sum delta exposures
     delta_exposure_summary = grouped['Delta_Exposure'].sum().reset_index()
 
-    # Calculate total call delta exposure and total put delta exposure
-    total_call_delta = delta_exposure_summary[delta_exposure_summary['Type'] == 'Call']['Delta_Exposure'].sum()
-    total_put_delta = delta_exposure_summary[delta_exposure_summary['Type'] == 'Put']['Delta_Exposure'].sum()
+    # Calculate total delta exposures
+    total_call_itm_delta = delta_exposure_summary[
+        (delta_exposure_summary['Type'] == 'Call') & (delta_exposure_summary['Moneyness'] == 'ITM')
+    ]['Delta_Exposure'].sum()
+    
+    total_put_itm_delta = delta_exposure_summary[
+        (delta_exposure_summary['Type'] == 'Put') & (delta_exposure_summary['Moneyness'] == 'ITM')
+    ]['Delta_Exposure'].sum()
+    
+    total_otm_call_delta = delta_exposure_summary[
+        (delta_exposure_summary['Type'] == 'Call') & (delta_exposure_summary['Moneyness'] == 'OTM')
+    ]['Delta_Exposure'].sum()
+    
+    total_otm_put_delta = delta_exposure_summary[
+        (delta_exposure_summary['Type'] == 'Put') & (delta_exposure_summary['Moneyness'] == 'OTM')
+    ]['Delta_Exposure'].sum()
 
-    # Display overall positioning
-    if total_call_delta > abs(total_put_delta) * 1.1:
-        overall_positioning = 'Bullish'
-    elif abs(total_put_delta) > total_call_delta * 1.1:
-        overall_positioning = 'Bearish'
-    else:
-        overall_positioning = 'Neutral'
+    # Initialize lists for scenarios
+    support_levels = []
+    resistance_levels = []
+    bullish_targets = []
+    bearish_targets = []
 
-    st.write(f"**Overall Positioning:** {overall_positioning}")
+    # 1. Support Levels (Significant ITM Calls)
+    itm_calls = filtered_options[
+        (filtered_options['Type'] == 'Call') & 
+        (filtered_options['Moneyness'] == 'ITM') & 
+        (filtered_options['Delta_Exposure'] > 0)
+    ]
+    if not itm_calls.empty:
+        threshold_call = itm_calls['Delta_Exposure'].quantile(0.75)
+        significant_itm_calls = itm_calls[itm_calls['Delta_Exposure'] >= threshold_call]
+        if not significant_itm_calls.empty:
+            support_levels = sorted(significant_itm_calls['strike'].tolist())
 
-    # Identify and display only one scenario based on priority
-    scenario_text = ""
+    # 2. Resistance Levels (Significant ITM Puts)
+    itm_puts = filtered_options[
+        (filtered_options['Type'] == 'Put') & 
+        (filtered_options['Moneyness'] == 'ITM') & 
+        (filtered_options['Delta_Exposure'] < 0)
+    ]
+    if not itm_puts.empty:
+        threshold_put = itm_puts['Delta_Exposure'].abs().quantile(0.75)
+        significant_itm_puts = itm_puts[itm_puts['Delta_Exposure'].abs() >= threshold_put]
+        if not significant_itm_puts.empty:
+            resistance_levels = sorted(significant_itm_puts['strike'].tolist(), reverse=True)
 
-    # Priority 1: Bullish Positioning
-    if overall_positioning == 'Bullish':
-        scenario_text = """
-        **Scenario:** Call delta nodes dominate, indicating bullish positioning.
-        The delta exposure chart shows that call delta nodes are larger and more frequent than put delta nodes.
-        This suggests that traders are predominantly buying call options, expecting the stock price to rise.
-        Market makers, in response, may hedge by buying the underlying stock, adding upward pressure to the price.
-        """
+    # 3. Bullish Targets (Significant OTM Calls)
+    otm_calls = filtered_options[
+        (filtered_options['Type'] == 'Call') & 
+        (filtered_options['Moneyness'] == 'OTM') & 
+        (filtered_options['Delta_Exposure'] > 0)
+    ]
+    if not otm_calls.empty:
+        threshold_bullish = otm_calls['Delta_Exposure'].quantile(0.75)
+        significant_otm_calls = otm_calls[otm_calls['Delta_Exposure'] >= threshold_bullish]
+        if not significant_otm_calls.empty:
+            bullish_targets = sorted(significant_otm_calls['strike'].tolist())
 
-    # Priority 2: Bearish Positioning
-    elif overall_positioning == 'Bearish':
-        scenario_text = """
-        **Scenario:** Put delta nodes dominate, indicating bearish positioning.
-        The delta exposure chart reveals that put delta nodes are larger and more frequent than call delta nodes.
-        This implies that traders are heavily buying put options, anticipating a decline in the stock price.
-        Market makers may hedge by selling the underlying stock, contributing to downward pressure on the price.
-        """
+    # 4. Bearish Targets (Significant OTM Puts)
+    otm_puts = filtered_options[
+        (filtered_options['Type'] == 'Put') & 
+        (filtered_options['Moneyness'] == 'OTM') & 
+        (filtered_options['Delta_Exposure'] < 0)
+    ]
+    if not otm_puts.empty:
+        threshold_bearish = otm_puts['Delta_Exposure'].abs().quantile(0.75)
+        significant_otm_puts = otm_puts[otm_puts['Delta_Exposure'].abs() >= threshold_bearish]
+        if not significant_otm_puts.empty:
+            bearish_targets = sorted(significant_otm_puts['strike'].tolist(), reverse=True)
 
-    # Priority 3: Neutral Positioning
-    elif overall_positioning == 'Neutral':
-        scenario_text = """
-        **Scenario:** Call and put delta nodes are balanced, indicating neutral positioning.
-        The delta exposure chart indicates a balance between call and put delta nodes.
-        This balance suggests that traders are uncertain about the stock's direction, possibly leading to range-bound or sideways price action.
-        Market makers' hedging activities may have a neutral effect on the stock's price.
-        """
+    # Create Analytics Chart
+    analytics_fig = go.Figure()
 
-    # Additional Priority 4: Significant ITM Call Delta (Support Levels)
-    # This scenario is considered only if no other scenario has been set
-    if not scenario_text:
-        itm_calls = filtered_options[(filtered_options['Type'] == 'Call') & (filtered_options['Moneyness'] == 'ITM')]
-        if not itm_calls.empty and itm_calls['Delta_Exposure'].sum() > 0:
-            scenario_text = """
-            **Scenario:** Significant ITM call delta nodes acting as support levels.
-            There are substantial in-the-money call delta exposures below the current price, indicating strong support levels.
-            These levels may act as a floor, as market makers hedge by buying the stock when prices approach these strikes.
-            """
+    # Plot Call Delta Exposure
+    analytics_fig.add_trace(
+        go.Scatter(
+            x=delta_exposure['strike'],
+            y=delta_exposure['Delta_Exposure_Call'],
+            mode='markers',
+            marker=dict(color='blue', size=8, opacity=0.6),
+            name='Call Delta Exposure'
+        )
+    )
 
-    # Priority 5: Significant OTM Call Delta (Bullish Targets)
-    if not scenario_text:
-        otm_calls = filtered_options[(filtered_options['Type'] == 'Call') & (filtered_options['Moneyness'] == 'OTM')]
-        if not otm_calls.empty and otm_calls['Delta_Exposure'].sum() > 0:
-            scenario_text = """
-            **Scenario:** Significant OTM call delta nodes acting as bullish targets.
-            There is notable out-of-the-money call delta exposure above the current price, suggesting traders are targeting higher price levels.
-            These strikes may act as magnets, drawing the price upward as market makers hedge their positions.
-            """
+    # Plot Put Delta Exposure
+    analytics_fig.add_trace(
+        go.Scatter(
+            x=delta_exposure['strike'],
+            y=delta_exposure['Delta_Exposure_Put'],
+            mode='markers',
+            marker=dict(color='orange', size=8, opacity=0.6),
+            name='Put Delta Exposure'
+        )
+    )
 
-    # Priority 6: Significant ITM Put Delta (Resistance Levels)
-    if not scenario_text:
-        itm_puts = filtered_options[(filtered_options['Type'] == 'Put') & (filtered_options['Moneyness'] == 'ITM')]
-        if not itm_puts.empty and itm_puts['Delta_Exposure'].sum() < 0:
-            scenario_text = """
-            **Scenario:** Significant ITM put delta nodes acting as resistance levels.
-            There are substantial in-the-money put delta exposures above the current price, indicating strong resistance levels.
-            These levels may act as a ceiling, as market makers hedge by selling the stock when prices approach these strikes.
-            """
+    # Plot Support Levels
+    for level in support_levels:
+        analytics_fig.add_shape(
+            type='line',
+            x0=lower_bound,
+            y0=level,
+            x1=upper_bound,
+            y1=level,
+            line=dict(color='green', width=2, dash='dash'),
+            name='Support Level'
+        )
+        analytics_fig.add_trace(
+            go.Scatter(
+                x=[lower_bound, upper_bound],
+                y=[level, level],
+                mode='lines',
+                line=dict(color='green', width=2, dash='dash'),
+                showlegend=False
+            )
+        )
 
-    # Priority 7: Significant OTM Put Delta (Bearish Targets)
-    if not scenario_text:
-        otm_puts = filtered_options[(filtered_options['Type'] == 'Put') & (filtered_options['Moneyness'] == 'OTM')]
-        if not otm_puts.empty and otm_puts['Delta_Exposure'].sum() < 0:
-            scenario_text = """
-            **Scenario:** Significant OTM put delta nodes acting as bearish targets.
-            There is notable out-of-the-money put delta exposure below the current price, suggesting traders are targeting lower price levels.
-            These strikes may act as targets for bearish price movement as market makers adjust their hedges.
-            """
+    # Plot Resistance Levels
+    for level in resistance_levels:
+        analytics_fig.add_shape(
+            type='line',
+            x0=lower_bound,
+            y0=level,
+            x1=upper_bound,
+            y1=level,
+            line=dict(color='red', width=2, dash='dash'),
+            name='Resistance Level'
+        )
+        analytics_fig.add_trace(
+            go.Scatter(
+                x=[lower_bound, upper_bound],
+                y=[level, level],
+                mode='lines',
+                line=dict(color='red', width=2, dash='dash'),
+                showlegend=False
+            )
+        )
 
-    # Display the applicable scenario
-    st.markdown("---")
-    st.subheader("📖 Detailed Analysis")
-    if scenario_text:
-        st.markdown(scenario_text)
-    else:
-        st.markdown("No significant scenarios detected based on the current delta exposure data.")
+    # Plot Bullish Targets
+    for level in bullish_targets:
+        analytics_fig.add_shape(
+            type='line',
+            x0=lower_bound,
+            y0=level,
+            x1=upper_bound,
+            y1=level,
+            line=dict(color='blue', width=2, dash='dot'),
+            name='Bullish Target'
+        )
+        analytics_fig.add_trace(
+            go.Scatter(
+                x=[lower_bound, upper_bound],
+                y=[level, level],
+                mode='lines',
+                line=dict(color='blue', width=2, dash='dot'),
+                showlegend=False
+            )
+        )
+
+    # Plot Bearish Targets
+    for level in bearish_targets:
+        analytics_fig.add_shape(
+            type='line',
+            x0=lower_bound,
+            y0=level,
+            x1=upper_bound,
+            y1=level,
+            line=dict(color='purple', width=2, dash='dot'),
+            name='Bearish Target'
+        )
+        analytics_fig.add_trace(
+            go.Scatter(
+                x=[lower_bound, upper_bound],
+                y=[level, level],
+                mode='lines',
+                line=dict(color='purple', width=2, dash='dot'),
+                showlegend=False
+            )
+        )
+
+    # Add Current Price Line
+    analytics_fig.add_shape(
+        type='line',
+        x0=lower_bound,
+        y0=S,
+        x1=upper_bound,
+        y1=S,
+        line=dict(color='black', width=2, dash='solid'),
+        name='Current Price'
+    )
+    analytics_fig.add_trace(
+        go.Scatter(
+            x=[lower_bound, upper_bound],
+            y=[S, S],
+            mode='lines',
+            line=dict(color='black', width=2, dash='solid'),
+            showlegend=False
+        )
+    )
+
+    # Update Layout
+    analytics_fig.update_layout(
+        title=f"📈 Analytics: Support, Resistance & Targets for {ticker.upper()}",
+        xaxis_title="Strike Price",
+        yaxis_title="Delta Exposure",
+        template='plotly_white',
+        height=700,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        margin=dict(l=100, r=100, t=100, b=100)
+    )
+
+    # Add Annotations for Current Price
+    analytics_fig.add_annotation(
+        x=upper_bound,
+        y=S,
+        xref="x",
+        yref="y",
+        text=f"Current Price: ${S:.2f}",
+        showarrow=True,
+        arrowhead=7,
+        ax=0,
+        ay=-40,
+        font=dict(color="black", size=12)
+    )
+
+    # Display the Analytics Chart
+    st.plotly_chart(analytics_fig, use_container_width=True)
 
 # Additional Insights Section
 st.markdown("---")
