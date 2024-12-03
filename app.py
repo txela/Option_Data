@@ -5,6 +5,7 @@ import math
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots  # Added import for make_subplots
 
 # Function to abbreviate numbers with K, M, B
 def abbreviate_number(num):
@@ -256,7 +257,7 @@ with tab1:
         ),
         template='plotly_white',
         hovermode='closest',
-        height=700,
+        height=700 if st.session_state.get("is_desktop", True) else 500,  # Adjust height based on device
         margin=dict(l=120, r=50, t=100, b=50),
         legend=dict(x=0.8, y=1.15, orientation='h', bgcolor='rgba(0,0,0,0)'),
         title=f"Delta Exposure by Strike Price for {ticker.upper()} ({expiry_date})",
@@ -325,6 +326,18 @@ with tab2:
     styled_df['Call Delta Exposure'] = styled_df['Call Delta Exposure'].astype(int).apply(abbreviate_number)
     styled_df['Put Delta Exposure'] = styled_df['Put Delta Exposure'].astype(int).apply(abbreviate_number)
     
+    # Make the DataFrame horizontally scrollable for mobile
+    st.markdown(
+        """
+        <style>
+        .dataframe {
+            width: 100%;
+            overflow-x: auto;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
     st.dataframe(styled_df.style.format("{:}"), height=400)
 
 with tab3:
@@ -421,168 +434,309 @@ with tab3:
         if not significant_otm_puts.empty:
             bearish_targets = sorted(significant_otm_puts['strike'].tolist(), reverse=True)
 
-    # Create Analytics Chart
-    analytics_fig = go.Figure()
+    # Identify Primary and Secondary Resistances
+    primary_resistance = resistance_levels[0] if len(resistance_levels) > 0 else None
+    secondary_resistance = resistance_levels[1] if len(resistance_levels) > 1 else None
 
-    # Plot Call Delta Exposure
-    analytics_fig.add_trace(
-        go.Scatter(
-            x=delta_exposure['strike'],
-            y=delta_exposure['Delta_Exposure_Call'],
-            mode='markers',
-            marker=dict(color='blue', size=8, opacity=0.6),
-            name='Call Delta Exposure'
-        )
-    )
+    # Identify Primary and Secondary Supports
+    primary_support = support_levels[0] if len(support_levels) > 0 else None
+    secondary_support = support_levels[1] if len(support_levels) > 1 else None
 
-    # Plot Put Delta Exposure
-    analytics_fig.add_trace(
-        go.Scatter(
-            x=delta_exposure['strike'],
-            y=delta_exposure['Delta_Exposure_Put'],
-            mode='markers',
-            marker=dict(color='orange', size=8, opacity=0.6),
-            name='Put Delta Exposure'
-        )
-    )
+    # Calculate Relative Strengths for Resistances
+    resistance_strengths = []
+    if primary_resistance:
+        strength = filtered_options[
+            (filtered_options['strike'] == primary_resistance) & 
+            (filtered_options['Type'] == 'Put')
+        ]['Delta_Exposure'].abs().sum()
+        resistance_strengths.append({'Level': primary_resistance, 'Strength': strength})
+    if secondary_resistance:
+        strength = filtered_options[
+            (filtered_options['strike'] == secondary_resistance) & 
+            (filtered_options['Type'] == 'Put')
+        ]['Delta_Exposure'].abs().sum()
+        resistance_strengths.append({'Level': secondary_resistance, 'Strength': strength})
 
-    # Plot Support Levels
-    for level in support_levels:
-        analytics_fig.add_shape(
-            type='line',
-            x0=lower_bound,
-            y0=level,
-            x1=upper_bound,
-            y1=level,
-            line=dict(color='green', width=2, dash='dash'),
-            name='Support Level'
-        )
-        analytics_fig.add_trace(
-            go.Scatter(
-                x=[lower_bound, upper_bound],
-                y=[level, level],
-                mode='lines',
-                line=dict(color='green', width=2, dash='dash'),
-                showlegend=False
+    # Calculate Relative Strengths for Supports
+    support_strengths = []
+    if primary_support:
+        strength = filtered_options[
+            (filtered_options['strike'] == primary_support) & 
+            (filtered_options['Type'] == 'Call')
+        ]['Delta_Exposure'].sum()
+        support_strengths.append({'Level': primary_support, 'Strength': strength})
+    if secondary_support:
+        strength = filtered_options[
+            (filtered_options['strike'] == secondary_support) & 
+            (filtered_options['Type'] == 'Call')
+        ]['Delta_Exposure'].sum()
+        support_strengths.append({'Level': secondary_support, 'Strength': strength})
+
+    # Create DataFrames for Resistances and Supports
+    resistances_df = pd.DataFrame(resistance_strengths)
+    supports_df = pd.DataFrame(support_strengths)
+
+    # Add Priority Labels
+    if not resistances_df.empty:
+        resistances_df = resistances_df.reset_index(drop=True)
+        priorities_res = ['Primary', 'Secondary'][:len(resistances_df)]
+        resistances_df.insert(0, 'Priority', priorities_res)
+
+    if not supports_df.empty:
+        supports_df = supports_df.reset_index(drop=True)
+        priorities_sup = ['Primary', 'Secondary'][:len(supports_df)]
+        supports_df.insert(0, 'Priority', priorities_sup)
+
+    # Display Current Price with Enhanced Visibility
+    st.markdown(f"### **Current Stock Price:** ${S:.2f}", unsafe_allow_html=False)
+
+    # Layout for Support and Resistance Tables Side by Side on Desktop and Stacked on Mobile
+    st.markdown("### 📌 Support and Resistance Levels")
+    res_col, sup_col = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
+
+    with res_col:
+        st.markdown("#### Resistances")
+        if not resistances_df.empty:
+            st.table(resistances_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
+        else:
+            st.write("No significant resistance levels identified.")
+
+    with sup_col:
+        st.markdown("#### Supports")
+        if not supports_df.empty:
+            st.table(supports_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
+        else:
+            st.write("No significant support levels identified.")
+
+    # Layout for Visualizations
+    col1, col2 = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
+
+    with col1:
+        # Bar Chart for Resistances and Supports
+        fig_strengths = go.Figure()
+
+        if not resistances_df.empty:
+            fig_strengths.add_trace(
+                go.Bar(
+                    x=resistances_df['Level'],
+                    y=resistances_df['Strength'],
+                    name='Resistance',
+                    marker_color='rgba(255, 99, 132, 0.7)',  # Soft Red
+                    text=[abbreviate_number(val) for val in resistances_df['Strength']],
+                    textposition='auto'
+                )
             )
-        )
-
-    # Plot Resistance Levels
-    for level in resistance_levels:
-        analytics_fig.add_shape(
-            type='line',
-            x0=lower_bound,
-            y0=level,
-            x1=upper_bound,
-            y1=level,
-            line=dict(color='red', width=2, dash='dash'),
-            name='Resistance Level'
-        )
-        analytics_fig.add_trace(
-            go.Scatter(
-                x=[lower_bound, upper_bound],
-                y=[level, level],
-                mode='lines',
-                line=dict(color='red', width=2, dash='dash'),
-                showlegend=False
+        if not supports_df.empty:
+            fig_strengths.add_trace(
+                go.Bar(
+                    x=supports_df['Level'],
+                    y=supports_df['Strength'],
+                    name='Support',
+                    marker_color='rgba(75, 192, 192, 0.7)',  # Soft Teal
+                    text=[abbreviate_number(val) for val in supports_df['Strength']],
+                    textposition='auto'
+                )
             )
+
+        fig_strengths.update_layout(
+            title="📊 Relative Strength of Supports and Resistances",
+            xaxis_title="Price Level",
+            yaxis_title="Relative Strength (Delta Exposure)",
+            barmode='group',
+            template='plotly_white',
+            height=400 if st.session_state.get("is_desktop", True) else 300,  # Adjust height based on device
+            margin=dict(l=50, r=50, t=50, b=50)
         )
 
-    # Plot Bullish Targets
-    for level in bullish_targets:
-        analytics_fig.add_shape(
-            type='line',
-            x0=lower_bound,
-            y0=level,
-            x1=upper_bound,
-            y1=level,
-            line=dict(color='blue', width=2, dash='dot'),
-            name='Bullish Target'
-        )
-        analytics_fig.add_trace(
-            go.Scatter(
-                x=[lower_bound, upper_bound],
-                y=[level, level],
-                mode='lines',
-                line=dict(color='blue', width=2, dash='dot'),
-                showlegend=False
-            )
-        )
+        st.plotly_chart(fig_strengths, use_container_width=True)
 
-    # Plot Bearish Targets
-    for level in bearish_targets:
-        analytics_fig.add_shape(
-            type='line',
-            x0=lower_bound,
-            y0=level,
-            x1=upper_bound,
-            y1=level,
-            line=dict(color='purple', width=2, dash='dot'),
-            name='Bearish Target'
-        )
-        analytics_fig.add_trace(
-            go.Scatter(
-                x=[lower_bound, upper_bound],
-                y=[level, level],
-                mode='lines',
-                line=dict(color='purple', width=2, dash='dot'),
-                showlegend=False
-            )
-        )
+    with col2:
+        # Gauge Charts for Current Price Proximity to Primary Resistance and Support
+        gauges = []
+        if primary_resistance:
+            proximity_res = (S / primary_resistance) * 100
+            proximity_res = min(proximity_res, 100)  # Cap at 100%
+            gauges.append(go.Indicator(
+                mode="gauge+number",
+                value=proximity_res,
+                title={'text': f"🔍 Proximity to Primary Resistance (${primary_resistance:.2f})"},
+                gauge={
+                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                    'bar': {'color': "darkred"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "#FFDDDD"},
+                        {'range': [50, 75], 'color': "#FFAAAA"},
+                        {'range': [75, 100], 'color': "#FF0000"},
+                    ],
+                    'threshold': {
+                        'line': {'color': "black", 'width': 4},
+                        'thickness': 0.75,
+                        'value': proximity_res
+                    }
+                }
+            ))
+        if primary_support:
+            proximity_sup = (primary_support / S) * 100
+            proximity_sup = min(proximity_sup, 100)  # Cap at 100%
+            gauges.append(go.Indicator(
+                mode="gauge+number",
+                value=proximity_sup,
+                title={'text': f"🔍 Proximity to Primary Support (${primary_support:.2f})"},
+                gauge={
+                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                    'bar': {'color': "darkgreen"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "#DDFFDD"},
+                        {'range': [50, 75], 'color': "#AAFFAA"},
+                        {'range': [75, 100], 'color': "#00FF00"},
+                    ],
+                    'threshold': {
+                        'line': {'color': "black", 'width': 4},
+                        'thickness': 0.75,
+                        'value': proximity_sup
+                    }
+                }
+            ))
 
-    # Add Current Price Line
-    analytics_fig.add_shape(
-        type='line',
-        x0=lower_bound,
-        y0=S,
-        x1=upper_bound,
-        y1=S,
-        line=dict(color='black', width=2, dash='solid'),
-        name='Current Price'
+        if gauges:
+            cols = len(gauges)
+            if st.session_state.get("is_desktop", True):
+                fig_gauges = make_subplots(rows=1, cols=cols, specs=[[{'type': 'indicator'}]*cols])
+                for i, gauge in enumerate(gauges):
+                    fig_gauges.add_trace(gauge, row=1, col=i+1)
+
+                fig_gauges.update_layout(
+                    title="📊 Proximity to Key Levels",
+                    template='plotly_white',
+                    height=400 if st.session_state.get("is_desktop", True) else 300,
+                    margin=dict(l=50, r=50, t=50, b=50)
+                )
+            else:
+                # For mobile, stack the gauges vertically
+                fig_gauges = make_subplots(rows=cols, cols=1, specs=[[{'type': 'indicator'}]]*cols)
+                for i, gauge in enumerate(gauges):
+                    fig_gauges.add_trace(gauge, row=i+1, col=1)
+
+                fig_gauges.update_layout(
+                    title="📊 Proximity to Key Levels",
+                    template='plotly_white',
+                    height=300 * cols if cols > 1 else 300,
+                    margin=dict(l=50, r=50, t=50, b=50)
+                )
+
+            st.plotly_chart(fig_gauges, use_container_width=True)
+        else:
+            st.write("No primary resistance or support levels to display proximity.")
+
+    # Dynamic Description Based on Scenarios
+    st.markdown("### 📝 Market Analysis Summary")
+    analysis = ""
+
+    # Calculate total support and resistance strengths
+    total_resistance_strength = resistances_df['Strength'].sum() if not resistances_df.empty else 0
+    total_support_strength = supports_df['Strength'].sum() if not supports_df.empty else 0
+
+    # Ratios
+    if total_resistance_strength > 0:
+        support_resistance_ratio = total_support_strength / total_resistance_strength
+    else:
+        support_resistance_ratio = float('inf') if total_support_strength > 0 else 0
+
+    # Dynamic Insights
+    if support_resistance_ratio > 1.5:
+        analysis += "- **Bullish Sentiment:** Strong support levels indicate significant buying interest, suggesting potential upward movement.\n"
+    elif support_resistance_ratio < 0.75:
+        analysis += "- **Bearish Sentiment:** Strong resistance levels indicate significant selling pressure, suggesting potential downward movement.\n"
+    else:
+        analysis += "- **Neutral Sentiment:** Balanced support and resistance levels indicate a possible consolidation phase.\n"
+
+    # Proximity Analysis
+    if primary_resistance and (S >= primary_resistance * 0.95):
+        analysis += "- **Approaching Resistance:** The current price is nearing the primary resistance level, which might act as a ceiling.\n"
+    if primary_support and (S <= primary_support * 1.05):
+        analysis += "- **Approaching Support:** The current price is nearing the primary support level, which might act as a floor.\n"
+
+    # Actionable Recommendations
+    if support_resistance_ratio > 1.5:
+        analysis += "- **Recommendation:** Consider bullish strategies such as buying calls or entering long positions near support levels.\n"
+    elif support_resistance_ratio < 0.75:
+        analysis += "- **Recommendation:** Consider bearish strategies such as buying puts or entering short positions near resistance levels.\n"
+    else:
+        analysis += "- **Recommendation:** Monitor the stock for breakouts or breakdowns beyond support and resistance levels.\n"
+
+    # Color Coding Based on Sentiment
+    if support_resistance_ratio > 1.5:
+        # Bullish Sentiment - Green
+        st.markdown("### 🟢 **Bullish Sentiment Detected**")
+    elif support_resistance_ratio < 0.75:
+        # Bearish Sentiment - Red
+        st.markdown("### 🔴 **Bearish Sentiment Detected**")
+    else:
+        # Neutral Sentiment - Yellow
+        st.markdown("### 🟡 **Neutral Sentiment Detected**")
+
+    st.markdown(analysis)
+
+    # Actionable Summary
+    st.markdown("### 📌 Actionable Summary")
+    summary = ""
+
+    if support_resistance_ratio > 1.5:
+        summary += "The market exhibits **strong bullish sentiment** with support levels providing a solid foundation for potential price increases. "
+        if primary_resistance and (S < primary_resistance):
+            summary += "Monitoring the approach towards the primary resistance can provide opportunities to enter bullish positions before potential breakouts.\n"
+    elif support_resistance_ratio < 0.75:
+        summary += "The market exhibits **strong bearish sentiment** with resistance levels posing significant barriers to price increases. "
+        if primary_support and (S > primary_support):
+            summary += "Monitoring the approach towards the primary support can provide opportunities to enter bearish positions before potential breakdowns.\n"
+    else:
+        summary += "The market is in a **neutral phase** with balanced support and resistance levels. "
+        summary += "It's advisable to watch for breakouts or breakdowns beyond these levels to determine the next trend direction.\n"
+
+    # Suggest Buy and Sell Ranges
+    buy_range = ""
+    sell_range = ""
+
+    if not supports_df.empty:
+        primary_sup = primary_support
+        secondary_sup = secondary_support if secondary_support else primary_sup
+        buy_low = primary_sup * 0.98  # 2% below primary support
+        buy_high = primary_sup * 1.02  # 2% above primary support
+        buy_range = f"${buy_low:.2f} - ${buy_high:.2f}"
+        summary += f"- **Suggested Buy Range:** Consider buying between **${buy_low:.2f}** and **${buy_high:.2f}** near the primary support level.\n"
+    
+    if not resistances_df.empty:
+        primary_res = primary_resistance
+        secondary_res = secondary_resistance if len(resistance_levels) >1 else primary_resistance
+        sell_low = primary_res * 0.98  # 2% below primary resistance
+        sell_high = primary_res * 1.02  # 2% above primary resistance
+        sell_range = f"${sell_low:.2f} - ${sell_high:.2f}"
+        summary += f"- **Suggested Sell Range:** Consider selling between **${sell_low:.2f}** and **${sell_high:.2f}** near the primary resistance level.\n"
+
+    st.markdown(summary)
+
+    # Additional Insights
+    st.markdown("---")
+    st.markdown("### 📈 Additional Insights")
+    st.markdown(
+        "- **Primary Resistance:** The most significant price level where selling pressure is expected to be strong enough to prevent the price from increasing further."
     )
-    analytics_fig.add_trace(
-        go.Scatter(
-            x=[lower_bound, upper_bound],
-            y=[S, S],
-            mode='lines',
-            line=dict(color='black', width=2, dash='solid'),
-            showlegend=False
-        )
+    st.markdown(
+        "- **Secondary Resistance:** The second most significant resistance level, indicating another potential price ceiling."
     )
-
-    # Update Layout
-    analytics_fig.update_layout(
-        title=f"📈 Analytics: Support, Resistance & Targets for {ticker.upper()}",
-        xaxis_title="Strike Price",
-        yaxis_title="Delta Exposure",
-        template='plotly_white',
-        height=700,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        margin=dict(l=100, r=100, t=100, b=100)
+    st.markdown(
+        "- **Primary Support:** The most significant price level where buying interest is expected to be strong enough to prevent the price from decreasing further."
     )
-
-    # Add Annotations for Current Price
-    analytics_fig.add_annotation(
-        x=upper_bound,
-        y=S,
-        xref="x",
-        yref="y",
-        text=f"Current Price: ${S:.2f}",
-        showarrow=True,
-        arrowhead=7,
-        ax=0,
-        ay=-40,
-        font=dict(color="black", size=12)
+    st.markdown(
+        "- **Secondary Support:** The second most significant support level, indicating another potential price floor."
     )
-
-    # Display the Analytics Chart
-    st.plotly_chart(analytics_fig, use_container_width=True)
+    st.markdown(
+        "- **Relative Strength:** Indicates the magnitude of delta exposure at each support and resistance level, helping to assess the strength of each level."
+    )
+    st.markdown(
+        "- **Buy Range:** Suggested price range near support levels where buying interest is strong.\n"
+        "- **Sell Range:** Suggested price range near resistance levels where selling pressure is strong."
+    )
 
 # Additional Insights Section
 st.markdown("---")
@@ -594,7 +748,7 @@ net_delta_puts = delta_exposure['Delta_Exposure_Put'].sum()
 overall_net_delta = net_delta_calls + net_delta_puts
 
 # Display Metrics in Columns with Abbreviated Numbers
-col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns(3) if st.session_state.get("is_desktop", True) else st.columns(1)
 
 with col1:
     st.metric(
