@@ -5,7 +5,7 @@ import math
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots  # Added import for make_subplots
+from plotly.subplots import make_subplots
 
 # Function to abbreviate numbers with K, M, B
 def abbreviate_number(num):
@@ -20,15 +20,21 @@ def abbreviate_number(num):
     else:
         return f"-{abbreviate_number(abs(num))}"
 
-# Black-Scholes Delta Calculation
-def calculate_delta(S, K, r, T, sigma, option_type="call"):
+# Black-Scholes Greeks Calculation
+def calculate_greeks(S, K, r, T, sigma, option_type="call"):
     if T <= 0:
-        return 0
+        return {'Delta': 0, 'Gamma': 0, 'Theta': 0, 'Vega': 0}
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    if option_type.lower() == "call":
-        return norm.cdf(d1)
-    elif option_type.lower() == "put":
-        return norm.cdf(d1) - 1
+    d2 = d1 - sigma * math.sqrt(T)
+    Delta = norm.cdf(d1) if option_type.lower() == "call" else norm.cdf(d1) - 1
+    Gamma = norm.pdf(d1) / (S * sigma * math.sqrt(T))
+    Theta_call = (- (S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T)) 
+                  - r * K * math.exp(-r * T) * norm.cdf(d2))
+    Theta_put = (- (S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T)) 
+                 + r * K * math.exp(-r * T) * norm.cdf(-d2))
+    Theta = Theta_call if option_type.lower() == "call" else Theta_put
+    Vega = S * norm.pdf(d1) * math.sqrt(T)
+    return {'Delta': Delta, 'Gamma': Gamma, 'Theta': Theta, 'Vega': Vega}
 
 # Streamlit UI Configuration
 st.set_page_config(page_title="Delta Hedging Exposure Visualization Tool", layout="wide")
@@ -39,7 +45,6 @@ with st.sidebar:
     st.header("🛠️ Input Parameters")
     st.markdown("### Stock Information")
     
-    # Directly placed the ticker input without expander
     ticker = st.text_input(
         "Stock Ticker",
         value="NVDA",
@@ -105,52 +110,64 @@ with st.sidebar:
         "💡 **Note:** Adjust the parameters in the sidebar to update the visualization and insights dynamically."
     )
 
-# Fetch Data
-stock = yf.Ticker(ticker)
-try:
-    S = stock.history(period="1d")["Close"].iloc[-1]
-except IndexError:
-    st.error("❌ Failed to fetch stock data. Please check the ticker symbol.")
-    st.stop()
+# Fetch Data with Enhanced Reliability
+@st.cache_data(ttl=600)
+def fetch_stock_data(ticker, dte_range, range_percent):
+    stock = yf.Ticker(ticker)
+    try:
+        S = stock.history(period="1d")["Close"].iloc[-1]
+    except (IndexError, KeyError):
+        st.error("❌ Failed to fetch stock data. Please check the ticker symbol.")
+        st.stop()
+    
+    expiry_dates = stock.options
+    if len(expiry_dates) == 0:
+        st.error("❌ No options data available for this ticker.")
+        st.stop()
+    
+    # Calculate Days to Expiry (DTE)
+    expiry_dates_dte = [
+        (expiry_date, (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days)
+        for expiry_date in expiry_dates
+    ]
+    
+    # Filter expiry dates based on DTE range
+    filtered_expiry_dates = [
+        date for date, dte in expiry_dates_dte if dte_range[0] <= dte <= dte_range[1]
+    ]
+    
+    if not filtered_expiry_dates:
+        st.error("❌ No options contracts available within the specified DTE range.")
+        st.stop()
+    
+    # Use the first expiry date from the filtered list by default
+    expiry_date = filtered_expiry_dates[0]
+    
+    try:
+        options_chain = stock.option_chain(expiry_date)
+    except Exception as e:
+        st.error(f"❌ Failed to fetch options data: {e}")
+        st.stop()
+    
+    return S, expiry_date, options_chain.calls, options_chain.puts
 
-expiry_dates = stock.options
-if len(expiry_dates) == 0:
-    st.error("❌ No options data available for this ticker.")
-    st.stop()
-
-# Calculate Days to Expiry (DTE)
-expiry_dates_dte = [
-    (expiry_date, (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days)
-    for expiry_date in expiry_dates
-]
-
-# Filter expiry dates based on DTE range
-filtered_expiry_dates = [
-    date for date, dte in expiry_dates_dte if dte_range[0] <= dte <= dte_range[1]
-]
-
-if not filtered_expiry_dates:
-    st.error("❌ No options contracts available within the specified DTE range.")
-    st.stop()
-
-# Use the first expiry date from the filtered list by default
-expiry_date = filtered_expiry_dates[0]
-
-try:
-    options_chain = stock.option_chain(expiry_date)
-except Exception as e:
-    st.error(f"❌ Failed to fetch options data: {e}")
-    st.stop()
+# Fetch the data
+S, expiry_date, calls, puts = fetch_stock_data(ticker, dte_range, range_percent)
 
 # Calculate Time to Expiry in Years
 T = (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days / 365
 T = max(T, 0.0001)  # Prevent division by zero or negative time
 
-# Calculate Delta for Calls and Puts
-calls = options_chain.calls.copy()
-puts = options_chain.puts.copy()
-calls["Delta"] = calls.apply(lambda x: calculate_delta(S, x["strike"], r, T, sigma, "call"), axis=1)
-puts["Delta"] = puts.apply(lambda x: calculate_delta(S, x["strike"], r, T, sigma, "put"), axis=1)
+# Calculate Greeks for Calls and Puts
+def calculate_all_greeks(row, option_type):
+    greeks = calculate_greeks(S, row["strike"], r, T, sigma, option_type)
+    return pd.Series(greeks)
+
+calls = calls.copy()
+puts = puts.copy()
+
+calls = calls.join(calls.apply(lambda row: calculate_all_greeks(row, "call"), axis=1))
+puts = puts.join(puts.apply(lambda row: calculate_all_greeks(row, "put"), axis=1))
 
 # Add Type Column
 calls["Type"] = "Call"
@@ -168,17 +185,26 @@ if 'openInterest' not in filtered_options.columns:
     st.stop()
 
 # Ensure 'openInterest' is numeric and handle missing values
-filtered_options.loc[:, 'openInterest'] = pd.to_numeric(filtered_options['openInterest'], errors='coerce').fillna(0)
+filtered_options['openInterest'] = pd.to_numeric(filtered_options['openInterest'], errors='coerce').fillna(0)
 
-# Calculate Delta Exposure Separately for Calls and Puts
+# Calculate Delta Exposure and Other Greeks Exposures
 # Multiply by 100 to account for contract size
-filtered_options.loc[:, 'Delta_Exposure'] = filtered_options.apply(
+filtered_options['Delta_Exposure'] = filtered_options.apply(
     lambda row: row['Delta'] * row['openInterest'] * 100, axis=1
+)
+filtered_options['Gamma_Exposure'] = filtered_options.apply(
+    lambda row: row['Gamma'] * row['openInterest'] * 100, axis=1
+)
+filtered_options['Theta_Exposure'] = filtered_options.apply(
+    lambda row: row['Theta'] * row['openInterest'] * 100, axis=1
+)
+filtered_options['Vega_Exposure'] = filtered_options.apply(
+    lambda row: row['Vega'] * row['openInterest'] * 100, axis=1
 )
 
 # Separate Delta Exposure for Calls and Puts
-delta_exposure_calls = filtered_options[filtered_options['Type'] == 'Call'].groupby('strike')['Delta_Exposure'].sum().reset_index()
-delta_exposure_puts = filtered_options[filtered_options['Type'] == 'Put'].groupby('strike')['Delta_Exposure'].sum().reset_index()
+delta_exposure_calls = filtered_options[filtered_options['Type'] == 'Call'].groupby('strike')[['Delta_Exposure', 'Gamma_Exposure', 'Theta_Exposure', 'Vega_Exposure']].sum().reset_index()
+delta_exposure_puts = filtered_options[filtered_options['Type'] == 'Put'].groupby('strike')[['Delta_Exposure', 'Gamma_Exposure', 'Theta_Exposure', 'Vega_Exposure']].sum().reset_index()
 
 # Merge Calls and Puts Delta Exposure
 delta_exposure = pd.merge(delta_exposure_calls, delta_exposure_puts, on='strike', how='outer', suffixes=('_Call', '_Put')).fillna(0)
@@ -253,7 +279,6 @@ with tab1:
             tickmode='linear',
             tick0=math.floor(lower_bound / 5) * 5,  # Adjust tick0 to nearest multiple of 5
             dtick=math.ceil((upper_bound - lower_bound) / 10 / 5) * 5,  # Adjust dtick to nearest multiple of 5
-            # Removed 'autorange' to let Plotly handle it automatically
         ),
         template='plotly_white',
         hovermode='closest',
@@ -318,13 +343,19 @@ with tab2:
     styled_df = delta_exposure.set_index('strike').rename(
         columns={
             'Delta_Exposure_Call': 'Call Delta Exposure', 
-            'Delta_Exposure_Put': 'Put Delta Exposure'
+            'Delta_Exposure_Put': 'Put Delta Exposure',
+            'Gamma_Exposure_Call': 'Call Gamma Exposure',
+            'Gamma_Exposure_Put': 'Put Gamma Exposure',
+            'Theta_Exposure_Call': 'Call Theta Exposure',
+            'Theta_Exposure_Put': 'Put Theta Exposure',
+            'Vega_Exposure_Call': 'Call Vega Exposure',
+            'Vega_Exposure_Put': 'Put Vega Exposure',
         }
     ).copy()
     
-    # Convert Delta Exposures to integers for abbreviation
-    styled_df['Call Delta Exposure'] = styled_df['Call Delta Exposure'].astype(int).apply(abbreviate_number)
-    styled_df['Put Delta Exposure'] = styled_df['Put Delta Exposure'].astype(int).apply(abbreviate_number)
+    # Convert Exposures to integers for abbreviation
+    for col in styled_df.columns:
+        styled_df[col] = styled_df[col].astype(int).apply(abbreviate_number)
     
     # Make the DataFrame horizontally scrollable for mobile
     st.markdown(
@@ -341,7 +372,7 @@ with tab2:
     st.dataframe(styled_df.style.format("{:}"), height=400)
 
 with tab3:
-    st.subheader("🔍 Analytics")
+    st.subheader("🔍 Enhanced Analytics")
     
     # Ensure that required data is available
     if filtered_options.empty:
@@ -355,7 +386,7 @@ with tab3:
         else:
             return 'ITM' if row['strike'] > S else 'OTM'
 
-    filtered_options.loc[:, 'Moneyness'] = filtered_options.apply(get_moneyness, axis=1)
+    filtered_options['Moneyness'] = filtered_options.apply(get_moneyness, axis=1)
 
     # Group by Type and Moneyness
     grouped = filtered_options.groupby(['Type', 'Moneyness'])
@@ -379,6 +410,131 @@ with tab3:
     total_otm_put_delta = delta_exposure_summary[
         (delta_exposure_summary['Type'] == 'Put') & (delta_exposure_summary['Moneyness'] == 'OTM')
     ]['Delta_Exposure'].sum()
+
+    # Additional Analytical Enhancements
+
+    # 1. Implied Volatility Skew Analysis
+    iv_skew = options.copy()
+    iv_skew_grouped = iv_skew.groupby('strike')['impliedVolatility'].agg(['mean', 'count']).reset_index()
+
+    # 2. Technical Indicators Integration
+    # Fetch historical price data for technical indicators
+    historical_data = yf.download(ticker, period="1y")  # Using yfinance directly for historical data
+    if historical_data.empty:
+        st.warning("No historical price data available to calculate technical indicators.")
+    else:
+        # Calculate Moving Averages
+        historical_data['SMA_50'] = historical_data['Close'].rolling(window=50).mean()
+        historical_data['EMA_20'] = historical_data['Close'].ewm(span=20, adjust=False).mean()
+        
+        # Calculate RSI
+        delta_prices = historical_data['Close'].diff()
+        up = delta_prices.clip(lower=0)
+        down = -delta_prices.clip(upper=0)
+        roll_up = up.rolling(window=14).mean()
+        roll_down = down.rolling(window=14).mean()
+        RS = roll_up / roll_down
+        historical_data['RSI'] = 100.0 - (100.0 / (1.0 + RS))
+        
+        # Get latest RSI and Moving Averages
+        latest_ma_50 = historical_data['SMA_50'].iloc[-1]
+        latest_ema_20 = historical_data['EMA_20'].iloc[-1]
+        latest_rsi = historical_data['RSI'].iloc[-1]
+    
+    # 3. Incorporate Option Volume Data
+    # Sum of volumes for calls and puts
+    volume_data = filtered_options.groupby('Type')['volume'].sum().reset_index()
+    total_call_volume = volume_data[volume_data['Type'] == 'Call']['volume'].sum()
+    total_put_volume = volume_data[volume_data['Type'] == 'Put']['volume'].sum()
+
+    # 4. Add Additional Greeks Exposure Analysis
+    gamma_exposure_total = filtered_options['Gamma_Exposure'].sum()
+    theta_exposure_total = filtered_options['Theta_Exposure'].sum()
+    vega_exposure_total = filtered_options['Vega_Exposure'].sum()
+
+    # 5. Implied Volatility Skew Visualization
+    fig_iv_skew = go.Figure()
+    fig_iv_skew.add_trace(
+        go.Scatter(
+            x=iv_skew_grouped['strike'],
+            y=iv_skew_grouped['mean'],
+            mode='lines+markers',
+            name='Implied Volatility',
+            line=dict(color='purple'),
+            marker=dict(size=6)
+        )
+    )
+    fig_iv_skew.update_layout(
+        title="📈 Implied Volatility Skew",
+        xaxis_title="Strike Price",
+        yaxis_title="Average Implied Volatility",
+        template='plotly_white',
+        height=400,
+        margin=dict(l=50, r=50, t=50, b=50)
+    )
+
+    # 6. Technical Indicators Visualization
+    if not historical_data.empty:
+        fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                 vertical_spacing=0.1, 
+                                 row_heights=[0.7, 0.3],
+                                 subplot_titles=("📈 Price with Moving Averages", "📉 RSI"))
+        
+        # Price with Moving Averages
+        fig_tech.add_trace(
+            go.Scatter(
+                x=historical_data.index,
+                y=historical_data['Close'],
+                mode='lines',
+                name='Close Price',
+                line=dict(color='black')
+            ),
+            row=1, col=1
+        )
+        fig_tech.add_trace(
+            go.Scatter(
+                x=historical_data.index,
+                y=historical_data['SMA_50'],
+                mode='lines',
+                name='SMA 50',
+                line=dict(color='blue')
+            ),
+            row=1, col=1
+        )
+        fig_tech.add_trace(
+            go.Scatter(
+                x=historical_data.index,
+                y=historical_data['EMA_20'],
+                mode='lines',
+                name='EMA 20',
+                line=dict(color='orange')
+            ),
+            row=1, col=1
+        )
+        
+        # RSI
+        fig_tech.add_trace(
+            go.Scatter(
+                x=historical_data.index,
+                y=historical_data['RSI'],
+                mode='lines',
+                name='RSI',
+                line=dict(color='green')
+            ),
+            row=2, col=1
+        )
+        fig_tech.add_hline(y=70, line=dict(color='red', dash='dash'), row=2, col=1)
+        fig_tech.add_hline(y=30, line=dict(color='blue', dash='dash'), row=2, col=1)
+        
+        fig_tech.update_layout(
+            title="📊 Technical Indicators",
+            template='plotly_white',
+            height=600,
+            margin=dict(l=50, r=50, t=100, b=50)
+        )
+
+    # 7. Backtesting Placeholder (Requires Historical Strategy Data)
+    # This section can be developed further with historical data and strategy rules.
 
     # Initialize lists for scenarios
     support_levels = []
@@ -492,143 +648,72 @@ with tab3:
 
     # Layout for Support and Resistance Tables Side by Side on Desktop and Stacked on Mobile
     st.markdown("### 📌 Support and Resistance Levels")
-    res_col, sup_col = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
-
-    with res_col:
+    cols = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
+    
+    with cols[0]:
         st.markdown("#### Resistances")
         if not resistances_df.empty:
             st.table(resistances_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
         else:
             st.write("No significant resistance levels identified.")
 
-    with sup_col:
-        st.markdown("#### Supports")
-        if not supports_df.empty:
-            st.table(supports_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
-        else:
-            st.write("No significant support levels identified.")
+    if st.session_state.get("is_desktop", True):
+        with cols[1]:
+            st.markdown("#### Supports")
+            if not supports_df.empty:
+                st.table(supports_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
+            else:
+                st.write("No significant support levels identified.")
+    else:
+        with cols[0]:
+            st.markdown("#### Supports")
+            if not supports_df.empty:
+                st.table(supports_df.style.format({"Level": "${:,.2f}", "Strength": "{:,.0f}"}))
+            else:
+                st.write("No significant support levels identified.")
 
     # Layout for Visualizations
-    col1, col2 = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
+    viz_cols = st.columns(2) if st.session_state.get("is_desktop", True) else st.columns(1)
 
-    with col1:
-        # Bar Chart for Resistances and Supports
-        fig_strengths = go.Figure()
-
-        if not resistances_df.empty:
-            fig_strengths.add_trace(
-                go.Bar(
-                    x=resistances_df['Level'],
-                    y=resistances_df['Strength'],
-                    name='Resistance',
-                    marker_color='rgba(255, 99, 132, 0.7)',  # Soft Red
-                    text=[abbreviate_number(val) for val in resistances_df['Strength']],
-                    textposition='auto'
-                )
-            )
-        if not supports_df.empty:
-            fig_strengths.add_trace(
-                go.Bar(
-                    x=supports_df['Level'],
-                    y=supports_df['Strength'],
-                    name='Support',
-                    marker_color='rgba(75, 192, 192, 0.7)',  # Soft Teal
-                    text=[abbreviate_number(val) for val in supports_df['Strength']],
-                    textposition='auto'
-                )
-            )
-
-        fig_strengths.update_layout(
-            title="📊 Relative Strength of Supports and Resistances",
-            xaxis_title="Price Level",
-            yaxis_title="Relative Strength (Delta Exposure)",
-            barmode='group',
-            template='plotly_white',
-            height=400 if st.session_state.get("is_desktop", True) else 300,  # Adjust height based on device
-            margin=dict(l=50, r=50, t=50, b=50)
+    # Display Option Volume Data
+    st.markdown("### 📊 Option Volume Analysis")
+    fig_volume = go.Figure()
+    fig_volume.add_trace(
+        go.Bar(
+            x=volume_data['Type'],
+            y=volume_data['volume'],
+            marker_color=['rgba(54, 162, 235, 0.7)', 'rgba(255, 159, 64, 0.7)'],
+            text=[abbreviate_number(val) for val in volume_data['volume']],
+            textposition='auto'
         )
+    )
+    fig_volume.update_layout(
+        title="🔢 Total Option Volume by Type",
+        xaxis_title="Option Type",
+        yaxis_title="Volume",
+        template='plotly_white',
+        height=400,
+        margin=dict(l=50, r=50, t=50, b=50)
+    )
+    st.plotly_chart(fig_volume, use_container_width=True)
 
-        st.plotly_chart(fig_strengths, use_container_width=True)
+    # Display Additional Greeks Exposure
+    st.markdown("### 📐 Additional Greeks Exposure")
+    greeks_exposure = pd.DataFrame({
+        'Gamma Exposure': [abbreviate_number(gamma_exposure_total)],
+        'Theta Exposure': [abbreviate_number(theta_exposure_total)],
+        'Vega Exposure': [abbreviate_number(vega_exposure_total)]
+    })
+    st.table(greeks_exposure)
 
-    with col2:
-        # Gauge Charts for Current Price Proximity to Primary Resistance and Support
-        gauges = []
-        if primary_resistance:
-            proximity_res = (S / primary_resistance) * 100
-            proximity_res = min(proximity_res, 100)  # Cap at 100%
-            gauges.append(go.Indicator(
-                mode="gauge+number",
-                value=proximity_res,
-                title={'text': f"🔍 Proximity to Primary Resistance (${primary_resistance:.2f})"},
-                gauge={
-                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "darkred"},
-                    'steps': [
-                        {'range': [0, 50], 'color': "#FFDDDD"},
-                        {'range': [50, 75], 'color': "#FFAAAA"},
-                        {'range': [75, 100], 'color': "#FF0000"},
-                    ],
-                    'threshold': {
-                        'line': {'color': "black", 'width': 4},
-                        'thickness': 0.75,
-                        'value': proximity_res
-                    }
-                }
-            ))
-        if primary_support:
-            proximity_sup = (primary_support / S) * 100
-            proximity_sup = min(proximity_sup, 100)  # Cap at 100%
-            gauges.append(go.Indicator(
-                mode="gauge+number",
-                value=proximity_sup,
-                title={'text': f"🔍 Proximity to Primary Support (${primary_support:.2f})"},
-                gauge={
-                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "darkgreen"},
-                    'steps': [
-                        {'range': [0, 50], 'color': "#DDFFDD"},
-                        {'range': [50, 75], 'color': "#AAFFAA"},
-                        {'range': [75, 100], 'color': "#00FF00"},
-                    ],
-                    'threshold': {
-                        'line': {'color': "black", 'width': 4},
-                        'thickness': 0.75,
-                        'value': proximity_sup
-                    }
-                }
-            ))
+    # Display Technical Indicators Summary
+    if not historical_data.empty:
+        st.markdown("### 📋 Technical Indicators Summary")
+        st.markdown(f"- **50-Day SMA:** ${latest_ma_50:.2f} (Current Price: {'Above' if S > latest_ma_50 else 'Below'})")
+        st.markdown(f"- **20-Day EMA:** ${latest_ema_20:.2f} (Current Price: {'Above' if S > latest_ema_20 else 'Below'})")
+        st.markdown(f"- **RSI (14):** {latest_rsi:.2f} ({'Overbought' if latest_rsi > 70 else 'Oversold' if latest_rsi < 30 else 'Neutral'})")
 
-        if gauges:
-            cols = len(gauges)
-            if st.session_state.get("is_desktop", True):
-                fig_gauges = make_subplots(rows=1, cols=cols, specs=[[{'type': 'indicator'}]*cols])
-                for i, gauge in enumerate(gauges):
-                    fig_gauges.add_trace(gauge, row=1, col=i+1)
-
-                fig_gauges.update_layout(
-                    title="📊 Proximity to Key Levels",
-                    template='plotly_white',
-                    height=400 if st.session_state.get("is_desktop", True) else 300,
-                    margin=dict(l=50, r=50, t=50, b=50)
-                )
-            else:
-                # For mobile, stack the gauges vertically
-                fig_gauges = make_subplots(rows=cols, cols=1, specs=[[{'type': 'indicator'}]]*cols)
-                for i, gauge in enumerate(gauges):
-                    fig_gauges.add_trace(gauge, row=i+1, col=1)
-
-                fig_gauges.update_layout(
-                    title="📊 Proximity to Key Levels",
-                    template='plotly_white',
-                    height=300 * cols if cols > 1 else 300,
-                    margin=dict(l=50, r=50, t=50, b=50)
-                )
-
-            st.plotly_chart(fig_gauges, use_container_width=True)
-        else:
-            st.write("No primary resistance or support levels to display proximity.")
-
-    # Dynamic Description Based on Scenarios
+    # Market Sentiment and Recommendations
     st.markdown("### 📝 Market Analysis Summary")
     analysis = ""
 
@@ -736,6 +821,36 @@ with tab3:
     st.markdown(
         "- **Buy Range:** Suggested price range near support levels where buying interest is strong.\n"
         "- **Sell Range:** Suggested price range near resistance levels where selling pressure is strong."
+    )
+    
+    # Incorporate Technical Indicators Summary
+    if not historical_data.empty:
+        st.markdown("---")
+        st.markdown("### 📊 Technical Indicators Overview")
+        st.markdown(f"- **50-Day SMA:** ${latest_ma_50:.2f} (Current Price: {'Above' if S > latest_ma_50 else 'Below'})")
+        st.markdown(f"- **20-Day EMA:** ${latest_ema_20:.2f} (Current Price: {'Above' if S > latest_ema_20 else 'Below'})")
+        st.markdown(f"- **RSI (14):** {latest_rsi:.2f} ({'Overbought' if latest_rsi > 70 else 'Oversold' if latest_rsi < 30 else 'Neutral'})")
+
+    # Incorporate Option Volume Insights
+    st.markdown("---")
+    st.markdown("### 📊 Option Volume Insights")
+    st.markdown(f"- **Total Call Volume:** {abbreviate_number(total_call_volume)}")
+    st.markdown(f"- **Total Put Volume:** {abbreviate_number(total_put_volume)}")
+    if total_call_volume > total_put_volume:
+        st.markdown("- **Volume Sentiment:** Higher call volume suggests bullish sentiment.")
+    elif total_put_volume > total_call_volume:
+        st.markdown("- **Volume Sentiment:** Higher put volume suggests bearish sentiment.")
+    else:
+        st.markdown("- **Volume Sentiment:** Balanced call and put volumes indicate neutral sentiment.")
+
+    # Risk Management Recommendations
+    st.markdown("---")
+    st.markdown("### 🔒 Risk Management Recommendations")
+    st.markdown(
+        "- **Diversify Positions:** Avoid overexposure to a single strike price or expiration date.\n"
+        "- **Monitor Technical Indicators:** Use MA and RSI to time entry and exit points.\n"
+        "- **Set Stop-Loss Orders:** Protect against unexpected market movements.\n"
+        "- **Adjust Hedging Strategies:** Rebalance delta exposure as market conditions change."
     )
 
 # Additional Insights Section
