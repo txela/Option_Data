@@ -233,8 +233,8 @@ with tab1:
                 color='rgba(54, 162, 235, 0.7)',  # Soft Blue
                 line=dict(color='rgba(54, 162, 235, 1.0)', width=1)
             ),
-            hovertemplate='Strike: %{y}<br>Call Delta Exposure: %{x:,}<extra></extra>',
-            name='Call Delta Exposure'
+            name='Call Delta Exposure',
+            hovertemplate="Strike: %{y}<br>Call Delta Exposure: %{x:,}<extra></extra>"
         )
     )
     
@@ -248,8 +248,8 @@ with tab1:
                 color='rgba(255, 159, 64, 0.7)',  # Soft Orange
                 line=dict(color='rgba(255, 159, 64, 1.0)', width=1)
             ),
-            hovertemplate='Strike: %{y}<br>Put Delta Exposure: %{x:,}<extra></extra>',
-            name='Put Delta Exposure'
+            name='Put Delta Exposure',
+            hovertemplate="Strike: %{y}<br>Put Delta Exposure: %{x:,}<extra></extra>"
         )
     )
     
@@ -321,16 +321,20 @@ with tab1:
         font=dict(color="green", size=12)
     )
     
-    # Update hover templates to use abbreviated numbers
-    fig.update_traces(
-        hovertemplate=[
-            f"Strike: {strike}<br>Call Delta Exposure: {abbreviate_number(call):s}" 
-            for strike, call in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Call'])
-        ] + [
-            f"Strike: {strike}<br>Put Delta Exposure: {abbreviate_number(put):s}" 
-            for strike, put in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Put'])
-        ]
-    )
+    # Remove or comment out the following block to prevent overwriting hover templates
+    # fig.update_traces(
+    #     hovertemplate=[
+    #         f"Strike: {strike}<br>Call Delta Exposure: {abbreviate_number(call):s}" 
+    #         for strike, call in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Call'])
+    #     ] + [
+    #         f"Strike: {strike}<br>Put Delta Exposure: {abbreviate_number(put):s}" 
+    #         for strike, put in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Put'])
+    #     ]
+    # )
+    
+    # Alternatively, if you prefer to use the abbreviated numbers in hovertemplate:
+    # (Ensure abbreviate_number is compatible with Plotly's formatting)
+    # You might need to define a custom hover function or preprocess the data accordingly.
     
     # Display the plot
     st.plotly_chart(fig, use_container_width=True)
@@ -713,11 +717,196 @@ with tab3:
         st.markdown(f"- **20-Day EMA:** ${latest_ema_20:.2f} (Current Price: {'Above' if S > latest_ema_20 else 'Below'})")
         st.markdown(f"- **RSI (14):** {latest_rsi:.2f} ({'Overbought' if latest_rsi > 70 else 'Oversold' if latest_rsi < 30 else 'Neutral'})")
 
-    # Market Sentiment and Recommendations
+    # Scenario Identification and Analysis
     st.markdown("### 📝 Market Analysis Summary")
-    analysis = ""
 
-    # Calculate total support and resistance strengths
+    # Function to identify and classify scenarios based on Greeks
+    def identify_and_classify_scenarios(filtered_options, S):
+        scenarios = []
+        classifications = {'Bullish': [], 'Bearish': [], 'Neutral': []}
+
+        # Calculate total Greeks
+        total_delta_calls = filtered_options[filtered_options['Type'] == 'Call']['Delta_Exposure'].sum()
+        total_delta_puts = filtered_options[filtered_options['Type'] == 'Put']['Delta_Exposure'].sum()
+        overall_net_delta = total_delta_calls + total_delta_puts
+
+        total_gamma_calls = filtered_options[filtered_options['Type'] == 'Call']['Gamma_Exposure'].sum()
+        total_gamma_puts = filtered_options[filtered_options['Type'] == 'Put']['Gamma_Exposure'].sum()
+        overall_gamma = total_gamma_calls + total_gamma_puts
+
+        total_vega_calls = filtered_options[filtered_options['Type'] == 'Call']['Vega_Exposure'].sum()
+        total_vega_puts = filtered_options[filtered_options['Type'] == 'Put']['Vega_Exposure'].sum()
+        overall_vega = total_vega_calls + total_vega_puts
+
+        total_theta_calls = filtered_options[filtered_options['Type'] == 'Call']['Theta_Exposure'].sum()
+        total_theta_puts = filtered_options[filtered_options['Type'] == 'Put']['Theta_Exposure'].sum()
+        overall_theta = total_theta_calls + total_theta_puts
+
+        # Calculate ratios
+        delta_ratio = abs(total_delta_calls) / abs(total_delta_puts) if abs(total_delta_puts) > 0 else float('inf')
+        vega_ratio = overall_vega / overall_gamma if overall_gamma > 0 else float('inf')
+        gamma_vega_ratio = overall_gamma / overall_vega if overall_vega > 0 else 0
+
+        # Scenario 1: Dominant Call Delta Exposure
+        if delta_ratio >= 2:
+            scenarios.append("Dominant Call Delta Exposure")
+            classifications['Bullish'].append("Dominant Call Delta Exposure")
+
+        # Scenario 2: Dominant Put Delta Exposure
+        elif delta_ratio <= 0.5:
+            scenarios.append("Dominant Put Delta Exposure")
+            classifications['Bearish'].append("Dominant Put Delta Exposure")
+
+        # Scenario 3: Balanced Delta Exposure
+        elif 0.8 <= delta_ratio <= 1.2:
+            scenarios.append("Balanced Delta Exposure")
+            classifications['Neutral'].append("Balanced Delta Exposure")
+
+        # Scenario 4: High Gamma Exposure Near Current Price
+        gamma_near = filtered_options[
+            (filtered_options['strike'] >= S * 0.95) & (filtered_options['strike'] <= S * 1.05)
+        ]['Gamma_Exposure'].sum()
+        if gamma_near >= 10000:
+            scenarios.append("High Gamma Exposure Near Current Price")
+            classifications['Neutral'].append("High Gamma Exposure Near Current Price")
+
+        # Scenario 5: High Vega Exposure Across Strikes
+        if overall_vega >= 50000:
+            scenarios.append("High Vega Exposure Across Strikes")
+            classifications['Neutral'].append("High Vega Exposure Across Strikes")
+
+        # Scenario 6: Divergent Gamma Exposure Between Calls and Puts
+        if (total_gamma_calls / total_gamma_puts) >= 2 or (total_gamma_puts / total_gamma_calls) >= 2:
+            scenarios.append("Divergent Gamma Exposure Between Calls and Puts")
+            classifications['Neutral'].append("Divergent Gamma Exposure Between Calls and Puts")
+
+        # Scenario 7: High Vega and Gamma Concentrated at Single Strike
+        concentrated_gamma = filtered_options.groupby('strike')['Gamma_Exposure'].sum()
+        concentrated_vega = filtered_options.groupby('strike')['Vega_Exposure'].sum()
+        top_gamma_strike = concentrated_gamma.abs().idxmax()
+        top_vega_strike = concentrated_vega.abs().idxmax()
+        if top_gamma_strike == top_vega_strike and (concentrated_gamma[top_gamma_strike] + concentrated_vega[top_vega_strike]) >= 30000:
+            scenarios.append("High Vega and Gamma Concentrated at Single Strike")
+            classifications['Neutral'].append("High Vega and Gamma Concentrated at Single Strike")
+
+        # Scenario 8: High Put Vega Exposure with Low Call Vega Exposure
+        if (total_vega_puts / total_vega_calls) >= 3:
+            scenarios.append("High Put Vega Exposure with Low Call Vega Exposure")
+            classifications['Bearish'].append("High Put Vega Exposure with Low Call Vega Exposure")
+
+        # Scenario 9: High Call Vega Exposure with Low Put Vega Exposure
+        if (total_vega_calls / total_vega_puts) >= 3:
+            scenarios.append("High Call Vega Exposure with Low Put Vega Exposure")
+            classifications['Bullish'].append("High Call Vega Exposure with Low Put Vega Exposure")
+
+        # Scenario 10: High Combined Gamma and Vega Exposure
+        if overall_gamma >= 20000 and overall_vega >= 50000:
+            scenarios.append("High Combined Gamma and Vega Exposure")
+            classifications['Neutral'].append("High Combined Gamma and Vega Exposure")
+
+        # Scenario 11: Negative Gamma Exposure (Inverted Gamma)
+        if overall_gamma < 0:
+            scenarios.append("Negative Gamma Exposure (Inverted Gamma)")
+            classifications['Bearish'].append("Negative Gamma Exposure (Inverted Gamma)")
+
+        # Scenario 12: Skewed Delta-Neutral Exposure
+        net_delta = overall_net_delta
+        if abs(net_delta) <= (0.1 * (total_delta_calls + abs(total_delta_puts))):
+            scenarios.append("Skewed Delta-Neutral Exposure")
+            classifications['Neutral'].append("Skewed Delta-Neutral Exposure")
+
+        # Scenario 13: Concentrated Delta Exposure at Multiple Strikes
+        high_delta_strikes = filtered_options.groupby('strike')['Delta_Exposure'].sum()
+        high_delta_strikes = high_delta_strikes.abs()
+        concentrated_deltas = high_delta_strikes[high_delta_strikes >= 10000].count()
+        if concentrated_deltas >= 3:
+            scenarios.append("Concentrated Delta Exposure at Multiple Strikes")
+            classifications['Neutral'].append("Concentrated Delta Exposure at Multiple Strikes")
+
+        # Additional Scenarios can be added similarly...
+
+        return classifications
+
+    # Function to generate analysis based on classified scenarios
+    def generate_comprehensive_analysis(classifications, filtered_options, resistances_df, supports_df, S, primary_resistance, primary_support):
+        analysis = ""
+
+        # Bullish Scenarios
+        if classifications['Bullish']:
+            analysis += "### 🟢 **Bullish Signals Detected**\n"
+            for scenario in classifications['Bullish']:
+                analysis += f"- **{scenario}:** Indicates potential upward movement. Hedging activities may support the stock price upwards.\n"
+
+        # Bearish Scenarios
+        if classifications['Bearish']:
+            analysis += "### 🔴 **Bearish Signals Detected**\n"
+            for scenario in classifications['Bearish']:
+                analysis += f"- **{scenario}:** Indicates potential downward movement. Hedging activities may exert downward pressure on the stock price.\n"
+
+        # Neutral Scenarios
+        if classifications['Neutral']:
+            analysis += "### 🟡 **Neutral Signals Detected**\n"
+            for scenario in classifications['Neutral']:
+                analysis += f"- **{scenario}:** Suggests balanced sentiment or increased volatility without a clear directional bias.\n"
+
+        # Aggregated Sentiment
+        sentiment = ""
+        if len(classifications['Bullish']) > len(classifications['Bearish']):
+            sentiment = "Bullish"
+        elif len(classifications['Bearish']) > len(classifications['Bullish']):
+            sentiment = "Bearish"
+        else:
+            sentiment = "Neutral"
+
+        # Summary Based on Aggregated Sentiment
+        if sentiment == "Bullish":
+            analysis += "\n### 🟢 **Overall Sentiment: Bullish**\n"
+        elif sentiment == "Bearish":
+            analysis += "\n### 🔴 **Overall Sentiment: Bearish**\n"
+        else:
+            analysis += "\n### 🟡 **Overall Sentiment: Neutral**\n"
+
+        # Proximity Analysis
+        if primary_resistance and (S >= primary_resistance * 0.95):
+            analysis += "- **Approaching Resistance:** The current price is nearing the primary resistance level, which might act as a ceiling.\n"
+        if primary_support and (S <= primary_support * 1.05):
+            analysis += "- **Approaching Support:** The current price is nearing the primary support level, which might act as a floor.\n"
+
+        # Suggest Buy and Sell Ranges
+        buy_range = ""
+        sell_range = ""
+
+        if not supports_df.empty:
+            primary_sup = primary_support
+            secondary_sup = secondary_support if secondary_support else primary_sup
+            buy_low = primary_sup * 0.98  # 2% below primary support
+            buy_high = primary_sup * 1.02  # 2% above primary support
+            buy_range = f"${buy_low:.2f} - ${buy_high:.2f}"
+            analysis += f"- **Suggested Buy Range:** Consider buying between **${buy_low:.2f}** and **${buy_high:.2f}** near the primary support level.\n"
+        
+        if not resistances_df.empty:
+            primary_res = primary_resistance
+            secondary_res = secondary_resistance if len(resistance_levels) >1 else primary_resistance
+            sell_low = primary_res * 0.98  # 2% below primary resistance
+            sell_high = primary_res * 1.02  # 2% above primary resistance
+            sell_range = f"${sell_low:.2f} - ${sell_high:.2f}"
+            analysis += f"- **Suggested Sell Range:** Consider selling between **${sell_low:.2f}** and **${sell_high:.2f}** near the primary resistance level.\n"
+
+        return analysis
+
+    # Identify and classify scenarios
+    classifications = identify_and_classify_scenarios(filtered_options, S)
+
+    # Generate comprehensive analysis text
+    analysis_text = generate_comprehensive_analysis(classifications, filtered_options, resistances_df, supports_df, S, primary_resistance, primary_support)
+
+    st.markdown(analysis_text)
+
+    # Actionable Summary
+    st.markdown("### 📌 Actionable Summary")
+    summary = ""
+
+    # Calculate support and resistance strengths for recommendations
     total_resistance_strength = resistances_df['Strength'].sum() if not resistances_df.empty else 0
     total_support_strength = supports_df['Strength'].sum() if not supports_df.empty else 0
 
@@ -727,76 +916,16 @@ with tab3:
     else:
         support_resistance_ratio = float('inf') if total_support_strength > 0 else 0
 
-    # Dynamic Insights
-    if support_resistance_ratio > 1.5:
-        analysis += "- **Bullish Sentiment:** Strong support levels indicate significant buying interest, suggesting potential upward movement.\n"
-    elif support_resistance_ratio < 0.75:
-        analysis += "- **Bearish Sentiment:** Strong resistance levels indicate significant selling pressure, suggesting potential downward movement.\n"
+    # Actionable Recommendations based on aggregated sentiment
+    if classifications['Bullish'] and not classifications['Bearish']:
+        summary += "The market exhibits **strong bullish sentiment** with multiple bullish signals indicating potential upward movement. Consider entering long positions or buying call options near identified support levels.\n"
+    elif classifications['Bearish'] and not classifications['Bullish']:
+        summary += "The market exhibits **strong bearish sentiment** with multiple bearish signals indicating potential downward movement. Consider entering short positions or buying put options near identified resistance levels.\n"
+    elif classifications['Bullish'] and classifications['Bearish']:
+        summary += "The market shows **mixed sentiment** with both bullish and bearish signals present. It's advisable to monitor the stock closely for breakouts or breakdowns beyond support and resistance levels to determine the prevailing trend.\n"
     else:
-        analysis += "- **Neutral Sentiment:** Balanced support and resistance levels indicate a possible consolidation phase.\n"
+        summary += "The market is in a **neutral phase** with balanced sentiment indicators. Consider range-bound trading strategies and watch for significant catalysts that may drive the stock into a new trend.\n"
 
-    # Proximity Analysis
-    if primary_resistance and (S >= primary_resistance * 0.95):
-        analysis += "- **Approaching Resistance:** The current price is nearing the primary resistance level, which might act as a ceiling.\n"
-    if primary_support and (S <= primary_support * 1.05):
-        analysis += "- **Approaching Support:** The current price is nearing the primary support level, which might act as a floor.\n"
-
-    # Actionable Recommendations
-    if support_resistance_ratio > 1.5:
-        analysis += "- **Recommendation:** Consider bullish strategies such as buying calls or entering long positions near support levels.\n"
-    elif support_resistance_ratio < 0.75:
-        analysis += "- **Recommendation:** Consider bearish strategies such as buying puts or entering short positions near resistance levels.\n"
-    else:
-        analysis += "- **Recommendation:** Monitor the stock for breakouts or breakdowns beyond support and resistance levels.\n"
-
-    # Color Coding Based on Sentiment
-    if support_resistance_ratio > 1.5:
-        # Bullish Sentiment - Green
-        st.markdown("### 🟢 **Bullish Sentiment Detected**")
-    elif support_resistance_ratio < 0.75:
-        # Bearish Sentiment - Red
-        st.markdown("### 🔴 **Bearish Sentiment Detected**")
-    else:
-        # Neutral Sentiment - Yellow
-        st.markdown("### 🟡 **Neutral Sentiment Detected**")
-
-    st.markdown(analysis)
-
-    # Actionable Summary
-    st.markdown("### 📌 Actionable Summary")
-    summary = ""
-
-    if support_resistance_ratio > 1.5:
-        summary += "The market exhibits **strong bullish sentiment** with support levels providing a solid foundation for potential price increases. "
-        if primary_resistance and (S < primary_resistance):
-            summary += "Monitoring the approach towards the primary resistance can provide opportunities to enter bullish positions before potential breakouts.\n"
-    elif support_resistance_ratio < 0.75:
-        summary += "The market exhibits **strong bearish sentiment** with resistance levels posing significant barriers to price increases. "
-        if primary_support and (S > primary_support):
-            summary += "Monitoring the approach towards the primary support can provide opportunities to enter bearish positions before potential breakdowns.\n"
-    else:
-        summary += "The market is in a **neutral phase** with balanced support and resistance levels. "
-        summary += "It's advisable to watch for breakouts or breakdowns beyond these levels to determine the next trend direction.\n"
-
-    # Suggest Buy and Sell Ranges
-    buy_range = ""
-    sell_range = ""
-
-    if not supports_df.empty:
-        primary_sup = primary_support
-        secondary_sup = secondary_support if secondary_support else primary_sup
-        buy_low = primary_sup * 0.98  # 2% below primary support
-        buy_high = primary_sup * 1.02  # 2% above primary support
-        buy_range = f"${buy_low:.2f} - ${buy_high:.2f}"
-        summary += f"- **Suggested Buy Range:** Consider buying between **${buy_low:.2f}** and **${buy_high:.2f}** near the primary support level.\n"
-    
-    if not resistances_df.empty:
-        primary_res = primary_resistance
-        secondary_res = secondary_resistance if len(resistance_levels) >1 else primary_resistance
-        sell_low = primary_res * 0.98  # 2% below primary resistance
-        sell_high = primary_res * 1.02  # 2% above primary resistance
-        sell_range = f"${sell_low:.2f} - ${sell_high:.2f}"
-        summary += f"- **Suggested Sell Range:** Consider selling between **${sell_low:.2f}** and **${sell_high:.2f}** near the primary resistance level.\n"
 
     st.markdown(summary)
 
@@ -852,6 +981,7 @@ with tab3:
         "- **Set Stop-Loss Orders:** Protect against unexpected market movements.\n"
         "- **Adjust Hedging Strategies:** Rebalance delta exposure as market conditions change."
     )
+
 
 # Additional Insights Section
 st.markdown("---")
