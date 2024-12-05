@@ -149,13 +149,16 @@ def fetch_stock_data(ticker, dte_range, range_percent):
         st.error(f"❌ Failed to fetch options data: {e}")
         st.stop()
     
-    return S, expiry_date, options_chain.calls, options_chain.puts
+    # Calculate Days to Expiry (DTE) for all options
+    days_to_expiry = (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days
+    
+    return S, expiry_date, options_chain.calls, options_chain.puts, days_to_expiry
 
 # Fetch the data
-S, expiry_date, calls, puts = fetch_stock_data(ticker, dte_range, range_percent)
+S, expiry_date, calls, puts, days_to_expiry = fetch_stock_data(ticker, dte_range, range_percent)
 
 # Calculate Time to Expiry in Years
-T = (pd.to_datetime(expiry_date) - pd.Timestamp.now()).days / 365
+T = days_to_expiry / 365
 T = max(T, 0.0001)  # Prevent division by zero or negative time
 
 # Calculate Greeks for Calls and Puts
@@ -178,6 +181,9 @@ options = pd.concat([calls, puts])
 lower_bound = S * (1 - range_percent / 100)
 upper_bound = S * (1 + range_percent / 100)
 filtered_options = options[(options['strike'] >= lower_bound) & (options['strike'] <= upper_bound)].copy()
+
+# Add 'days_to_expiry' column
+filtered_options['days_to_expiry'] = days_to_expiry
 
 # Verify if 'openInterest' exists
 if 'openInterest' not in filtered_options.columns:
@@ -212,6 +218,7 @@ delta_exposure = pd.merge(delta_exposure_calls, delta_exposure_puts, on='strike'
 # Tabs for Organized Display
 tab1, tab2, tab3 = st.tabs(["📈 Visualization", "📊 Data Overview", "🔍 Analytics"])
 
+# ========== Tab 1: Visualization ==========
 with tab1:
     st.subheader("📈 Delta Exposure by Strike Price")
     
@@ -321,24 +328,10 @@ with tab1:
         font=dict(color="green", size=12)
     )
     
-    # Remove or comment out the following block to prevent overwriting hover templates
-    # fig.update_traces(
-    #     hovertemplate=[
-    #         f"Strike: {strike}<br>Call Delta Exposure: {abbreviate_number(call):s}" 
-    #         for strike, call in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Call'])
-    #     ] + [
-    #         f"Strike: {strike}<br>Put Delta Exposure: {abbreviate_number(put):s}" 
-    #         for strike, put in zip(delta_exposure['strike'], delta_exposure['Delta_Exposure_Put'])
-    #     ]
-    # )
-    
-    # Alternatively, if you prefer to use the abbreviated numbers in hovertemplate:
-    # (Ensure abbreviate_number is compatible with Plotly's formatting)
-    # You might need to define a custom hover function or preprocess the data accordingly.
-    
     # Display the plot
     st.plotly_chart(fig, use_container_width=True)
 
+# ========== Tab 2: Data Overview ==========
 with tab2:
     st.subheader(f"📊 Delta Hedging Exposure for {ticker.upper()} (Expiry: {expiry_date})")
     st.markdown(f"**Current Stock Price:** ${S:.2f} | **Strike Range:** ±{range_percent}%")
@@ -375,6 +368,7 @@ with tab2:
     )
     st.dataframe(styled_df.style.format("{:}"), height=400)
 
+# ========== Tab 3: Analytics ==========
 with tab3:
     st.subheader("🔍 Enhanced Analytics")
     
@@ -457,6 +451,7 @@ with tab3:
     vega_exposure_total = filtered_options['Vega_Exposure'].sum()
 
     # 5. Implied Volatility Skew Visualization
+    st.markdown("### 📈 Implied Volatility Skew")
     fig_iv_skew = go.Figure()
     fig_iv_skew.add_trace(
         go.Scatter(
@@ -477,68 +472,7 @@ with tab3:
         margin=dict(l=50, r=50, t=50, b=50)
     )
 
-    # 6. Technical Indicators Visualization
-    if not historical_data.empty:
-        fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                 vertical_spacing=0.1, 
-                                 row_heights=[0.7, 0.3],
-                                 subplot_titles=("📈 Price with Moving Averages", "📉 RSI"))
-        
-        # Price with Moving Averages
-        fig_tech.add_trace(
-            go.Scatter(
-                x=historical_data.index,
-                y=historical_data['Close'],
-                mode='lines',
-                name='Close Price',
-                line=dict(color='black')
-            ),
-            row=1, col=1
-        )
-        fig_tech.add_trace(
-            go.Scatter(
-                x=historical_data.index,
-                y=historical_data['SMA_50'],
-                mode='lines',
-                name='SMA 50',
-                line=dict(color='blue')
-            ),
-            row=1, col=1
-        )
-        fig_tech.add_trace(
-            go.Scatter(
-                x=historical_data.index,
-                y=historical_data['EMA_20'],
-                mode='lines',
-                name='EMA 20',
-                line=dict(color='orange')
-            ),
-            row=1, col=1
-        )
-        
-        # RSI
-        fig_tech.add_trace(
-            go.Scatter(
-                x=historical_data.index,
-                y=historical_data['RSI'],
-                mode='lines',
-                name='RSI',
-                line=dict(color='green')
-            ),
-            row=2, col=1
-        )
-        fig_tech.add_hline(y=70, line=dict(color='red', dash='dash'), row=2, col=1)
-        fig_tech.add_hline(y=30, line=dict(color='blue', dash='dash'), row=2, col=1)
-        
-        fig_tech.update_layout(
-            title="📊 Technical Indicators",
-            template='plotly_white',
-            height=600,
-            margin=dict(l=50, r=50, t=100, b=50)
-        )
-
-    # 7. Backtesting Placeholder (Requires Historical Strategy Data)
-    # This section can be developed further with historical data and strategy rules.
+    st.plotly_chart(fig_iv_skew, use_container_width=True)
 
     # Initialize lists for scenarios
     support_levels = []
@@ -747,6 +681,8 @@ with tab3:
         vega_ratio = overall_vega / overall_gamma if overall_gamma > 0 else float('inf')
         gamma_vega_ratio = overall_gamma / overall_vega if overall_vega > 0 else 0
 
+        # Define all 30 scenarios with classification
+
         # Scenario 1: Dominant Call Delta Exposure
         if delta_ratio >= 2:
             scenarios.append("Dominant Call Delta Exposure")
@@ -776,7 +712,7 @@ with tab3:
             classifications['Neutral'].append("High Vega Exposure Across Strikes")
 
         # Scenario 6: Divergent Gamma Exposure Between Calls and Puts
-        if (total_gamma_calls / total_gamma_puts) >= 2 or (total_gamma_puts / total_gamma_calls) >= 2:
+        if (total_gamma_calls / (total_gamma_puts + 1) >= 2) or (total_gamma_puts / (total_gamma_calls + 1) >= 2):
             scenarios.append("Divergent Gamma Exposure Between Calls and Puts")
             classifications['Neutral'].append("Divergent Gamma Exposure Between Calls and Puts")
 
@@ -790,17 +726,17 @@ with tab3:
             classifications['Neutral'].append("High Vega and Gamma Concentrated at Single Strike")
 
         # Scenario 8: High Put Vega Exposure with Low Call Vega Exposure
-        if (total_vega_puts / total_vega_calls) >= 3:
+        if (total_vega_puts / (total_vega_calls + 1) >= 3):
             scenarios.append("High Put Vega Exposure with Low Call Vega Exposure")
             classifications['Bearish'].append("High Put Vega Exposure with Low Call Vega Exposure")
 
         # Scenario 9: High Call Vega Exposure with Low Put Vega Exposure
-        if (total_vega_calls / total_vega_puts) >= 3:
+        if (total_vega_calls / (total_vega_puts + 1) >= 3):
             scenarios.append("High Call Vega Exposure with Low Put Vega Exposure")
             classifications['Bullish'].append("High Call Vega Exposure with Low Put Vega Exposure")
 
         # Scenario 10: High Combined Gamma and Vega Exposure
-        if overall_gamma >= 20000 and overall_vega >= 50000:
+        if (overall_gamma >= 20000) and (overall_vega >= 50000):
             scenarios.append("High Combined Gamma and Vega Exposure")
             classifications['Neutral'].append("High Combined Gamma and Vega Exposure")
 
@@ -811,7 +747,7 @@ with tab3:
 
         # Scenario 12: Skewed Delta-Neutral Exposure
         net_delta = overall_net_delta
-        if abs(net_delta) <= (0.1 * (total_delta_calls + abs(total_delta_puts))):
+        if abs(net_delta) <= (0.1 * (abs(total_delta_calls) + abs(total_delta_puts))):
             scenarios.append("Skewed Delta-Neutral Exposure")
             classifications['Neutral'].append("Skewed Delta-Neutral Exposure")
 
@@ -823,12 +759,124 @@ with tab3:
             scenarios.append("Concentrated Delta Exposure at Multiple Strikes")
             classifications['Neutral'].append("Concentrated Delta Exposure at Multiple Strikes")
 
-        # Additional Scenarios can be added similarly...
+        # Scenario 14: High Theta Exposure on Puts
+        overall_theta_puts = filtered_options[
+            (filtered_options['Type'] == 'Put')
+        ]['Theta_Exposure'].sum()
+        if overall_theta_puts >= 15000:
+            scenarios.append("High Theta Exposure on Puts")
+            classifications['Bearish'].append("High Theta Exposure on Puts")
+
+        # Scenario 15: High Theta Exposure on Calls
+        overall_theta_calls = filtered_options[
+            (filtered_options['Type'] == 'Call')
+        ]['Theta_Exposure'].sum()
+        if overall_theta_calls >= 15000:
+            scenarios.append("High Theta Exposure on Calls")
+            classifications['Bullish'].append("High Theta Exposure on Calls")
+
+        # Scenario 16: High Ratio of Gamma to Vega
+        if gamma_vega_ratio >= 0.1:
+            scenarios.append("High Ratio of Gamma to Vega")
+            if gamma_vega_ratio >= 1:
+                classifications['Bullish'].append("High Ratio of Gamma to Vega")
+            else:
+                classifications['Bearish'].append("High Ratio of Gamma to Vega")
+
+        # Scenario 17: Low Ratio of Gamma to Vega
+        if gamma_vega_ratio <= 0.1 and overall_gamma > 0 and overall_vega > 0:
+            scenarios.append("Low Ratio of Gamma to Vega")
+            if gamma_vega_ratio <= 0.05:
+                classifications['Bearish'].append("Low Ratio of Gamma to Vega")
+            else:
+                classifications['Neutral'].append("Low Ratio of Gamma to Vega")
+
+        # Scenario 18: High Short-Dated Options Exposure
+        # Define short-dated as DTE <= 30
+        short_dated_theta = filtered_options[
+            (filtered_options['days_to_expiry'] <= 30)
+        ]['Theta_Exposure'].sum()
+        if short_dated_theta >= 20000:
+            scenarios.append("High Short-Dated Options Exposure")
+            classifications['Neutral'].append("High Short-Dated Options Exposure")
+
+        # Scenario 19: High Long-Dated Options Exposure
+        # Define long-dated as DTE > 180
+        long_dated_vega = filtered_options[
+            (filtered_options['days_to_expiry'] > 180)
+        ]['Vega_Exposure'].sum()
+        if long_dated_vega >= 30000:
+            scenarios.append("High Long-Dated Options Exposure")
+            classifications['Neutral'].append("High Long-Dated Options Exposure")
+
+        # Scenario 20: High Implied Volatility Skew
+        iv_skew_mean = iv_skew_grouped['mean'].mean()
+        iv_skew_std = iv_skew_grouped['mean'].std()
+        high_iv_skew = iv_skew_grouped[iv_skew_grouped['mean'] >= (iv_skew_mean + 2 * iv_skew_std)]
+        if not high_iv_skew.empty:
+            scenarios.append("High Implied Volatility Skew")
+            classifications['Neutral'].append("High Implied Volatility Skew")
+
+        # Scenario 21: Low Implied Volatility Skew
+        low_iv_skew = iv_skew_grouped[iv_skew_grouped['mean'] <= (iv_skew_mean - 2 * iv_skew_std)]
+        if not low_iv_skew.empty:
+            scenarios.append("Low Implied Volatility Skew")
+            classifications['Neutral'].append("Low Implied Volatility Skew")
+
+        # Scenario 22: High Open Interest in Calls
+        high_oi_calls = filtered_options[filtered_options['Type'] == 'Call']['openInterest'].sum()
+        if high_oi_calls >= 50000:
+            scenarios.append("High Open Interest in Calls")
+            classifications['Bullish'].append("High Open Interest in Calls")
+
+        # Scenario 23: High Open Interest in Puts
+        high_oi_puts = filtered_options[filtered_options['Type'] == 'Put']['openInterest'].sum()
+        if high_oi_puts >= 50000:
+            scenarios.append("High Open Interest in Puts")
+            classifications['Bearish'].append("High Open Interest in Puts")
+
+        # Scenario 24: High Combined Theta and Vega Exposure
+        if (overall_theta >= 20000) and (overall_vega >= 50000):
+            scenarios.append("High Combined Theta and Vega Exposure")
+            classifications['Neutral'].append("High Combined Theta and Vega Exposure")
+
+        # Scenario 25: Extreme Delta Exposure
+        if abs(overall_net_delta) >= 100000:
+            scenarios.append("Extreme Delta Exposure")
+            if overall_net_delta > 0:
+                classifications['Bullish'].append("Extreme Delta Exposure")
+            else:
+                classifications['Bearish'].append("Extreme Delta Exposure")
+
+        # Scenario 26: Gamma Exposure Dominated by Calls
+        if (total_gamma_calls / (total_gamma_puts + 1) >= 3):
+            scenarios.append("Gamma Exposure Dominated by Calls")
+            classifications['Bullish'].append("Gamma Exposure Dominated by Calls")
+
+        # Scenario 27: Gamma Exposure Dominated by Puts
+        if (total_gamma_puts / (total_gamma_calls + 1) >= 3):
+            scenarios.append("Gamma Exposure Dominated by Puts")
+            classifications['Bearish'].append("Gamma Exposure Dominated by Puts")
+
+        # Scenario 28: Vega Exposure Dominated by Calls
+        if (total_vega_calls / (total_vega_puts + 1) >= 3):
+            scenarios.append("Vega Exposure Dominated by Calls")
+            classifications['Bullish'].append("Vega Exposure Dominated by Calls")
+
+        # Scenario 29: Vega Exposure Dominated by Puts
+        if (total_vega_puts / (total_vega_calls + 1) >= 3):
+            scenarios.append("Vega Exposure Dominated by Puts")
+            classifications['Bearish'].append("Vega Exposure Dominated by Puts")
+
+        # Scenario 30: Theta Exposure Dominated by Puts
+        if (overall_theta_puts / (overall_theta_calls + 1) >= 2):
+            scenarios.append("Theta Exposure Dominated by Puts")
+            classifications['Bearish'].append("Theta Exposure Dominated by Puts")
 
         return classifications
 
     # Function to generate analysis based on classified scenarios
-    def generate_comprehensive_analysis(classifications, filtered_options, resistances_df, supports_df, S, primary_resistance, primary_support):
+    def generate_comprehensive_analysis(classifications, resistances_df, supports_df, S, primary_resistance, primary_support):
         analysis = ""
 
         # Bullish Scenarios
@@ -861,10 +909,13 @@ with tab3:
         # Summary Based on Aggregated Sentiment
         if sentiment == "Bullish":
             analysis += "\n### 🟢 **Overall Sentiment: Bullish**\n"
+            analysis += "- **Recommendation:** Consider bullish strategies such as buying calls or entering long positions near support levels.\n"
         elif sentiment == "Bearish":
             analysis += "\n### 🔴 **Overall Sentiment: Bearish**\n"
+            analysis += "- **Recommendation:** Consider bearish strategies such as buying puts or entering short positions near resistance levels.\n"
         else:
             analysis += "\n### 🟡 **Overall Sentiment: Neutral**\n"
+            analysis += "- **Recommendation:** Monitor the stock for breakouts or breakdowns beyond support and resistance levels to determine the prevailing trend.\n"
 
         # Proximity Analysis
         if primary_resistance and (S >= primary_resistance * 0.95):
@@ -873,23 +924,16 @@ with tab3:
             analysis += "- **Approaching Support:** The current price is nearing the primary support level, which might act as a floor.\n"
 
         # Suggest Buy and Sell Ranges
-        buy_range = ""
-        sell_range = ""
-
         if not supports_df.empty:
             primary_sup = primary_support
-            secondary_sup = secondary_support if secondary_support else primary_sup
             buy_low = primary_sup * 0.98  # 2% below primary support
             buy_high = primary_sup * 1.02  # 2% above primary support
-            buy_range = f"${buy_low:.2f} - ${buy_high:.2f}"
             analysis += f"- **Suggested Buy Range:** Consider buying between **${buy_low:.2f}** and **${buy_high:.2f}** near the primary support level.\n"
         
         if not resistances_df.empty:
             primary_res = primary_resistance
-            secondary_res = secondary_resistance if len(resistance_levels) >1 else primary_resistance
             sell_low = primary_res * 0.98  # 2% below primary resistance
             sell_high = primary_res * 1.02  # 2% above primary resistance
-            sell_range = f"${sell_low:.2f} - ${sell_high:.2f}"
             analysis += f"- **Suggested Sell Range:** Consider selling between **${sell_low:.2f}** and **${sell_high:.2f}** near the primary resistance level.\n"
 
         return analysis
@@ -898,7 +942,7 @@ with tab3:
     classifications = identify_and_classify_scenarios(filtered_options, S)
 
     # Generate comprehensive analysis text
-    analysis_text = generate_comprehensive_analysis(classifications, filtered_options, resistances_df, supports_df, S, primary_resistance, primary_support)
+    analysis_text = generate_comprehensive_analysis(classifications, resistances_df, supports_df, S, primary_resistance, primary_support)
 
     st.markdown(analysis_text)
 
@@ -977,11 +1021,10 @@ with tab3:
     st.markdown("### 🔒 Risk Management Recommendations")
     st.markdown(
         "- **Diversify Positions:** Avoid overexposure to a single strike price or expiration date.\n"
-        "- **Monitor Technical Indicators:** Use MA and RSI to time entry and exit points.\n"
+        "- **Monitor Option Volumes:** Use volume data to gauge market sentiment and adjust strategies accordingly.\n"
         "- **Set Stop-Loss Orders:** Protect against unexpected market movements.\n"
         "- **Adjust Hedging Strategies:** Rebalance delta exposure as market conditions change."
     )
-
 
 # Additional Insights Section
 st.markdown("---")
